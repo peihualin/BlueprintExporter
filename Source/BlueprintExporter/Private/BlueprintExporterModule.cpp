@@ -558,6 +558,18 @@ bool FBlueprintExporterModule::ExportBlueprintToCache(UBlueprint* Blueprint)
 		FilesWritten++;
 	}
 
+	// Write compact file (if enabled)
+	const UBlueprintExporterSettings* Settings = GetDefault<UBlueprintExporterSettings>();
+	if (Settings && Settings->bGenerateCompactFile)
+	{
+		const FString CompactText = Formatter.FormatCompactBlueprint(ExportedBP);
+		const FString CompactPath = FPaths::Combine(OutputDir, TEXT("_compact.txt"));
+		if (WriteFileIfChanged(CompactPath, CompactText))
+		{
+			FilesWritten++;
+		}
+	}
+
 	if (FilesWritten > 0)
 	{
 		UE_LOG(LogBlueprintExporter, Log,

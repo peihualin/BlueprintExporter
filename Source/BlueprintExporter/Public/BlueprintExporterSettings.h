@@ -40,4 +40,8 @@ public:
 	// Content Filter
 	UPROPERTY(Config, EditAnywhere, Category="Export Filter|Content", meta=(ClampMin=1, ClampMax=100))
 	int32 MinNodeCount = 2;
+
+	// Compact File
+	UPROPERTY(Config, EditAnywhere, Category="Output")
+	bool bGenerateCompactFile = true;
 };

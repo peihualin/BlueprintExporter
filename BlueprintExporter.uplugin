@@ -1,9 +1,9 @@
 {
 	"FileVersion": 3,
-	"Version": 1,
-	"VersionName": "1.0",
+	"Version": 8,
+	"VersionName": "v8",
 	"FriendlyName": "Blueprint Exporter",
-	"Description": "Export blueprint logic to AI-readable plain text format",
+	"Description": "Export blueprint logic to AI-readable plain text format (Compact mode + Semantic node titles)",
 	"Category": "Editor",
 	"CreatedBy": "Capybara",
 	"CreatedByURL": "",
