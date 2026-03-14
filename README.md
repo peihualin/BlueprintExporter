@@ -1,6 +1,6 @@
 # BlueprintExporter 插件参考文档
 
-> 适用版本：v8（紧凑格式 + 语义化节点 + Compact 模式）
+> 适用版本：v10（语义连接 + CDO 配置导出 + GAS 专用格式化）
 > 引擎：Unreal Engine 5.x（Editor-only Plugin）
 > 作者：Capybara、Claude
 
@@ -35,7 +35,7 @@ BlueprintExporter 是一个 UE5 Editor-only 插件，将蓝图的节点图（Eve
 |自动导出（保存时）|Ctrl+S 时自动触发，受 `bAutoExportOnSave` 开关控制|
 |关闭编辑器时全量导出|关闭编辑器前自动触发，受 `bExportOnEditorClose` 开关控制|
 |选中节点导出|蓝图编辑器内右键节点 → Copy / Export Selected Nodes|
-|Compact 模式（伪代码视图）|全量导出时自动生成 `_compact.txt`（可配置）|
+|CDO 配置导出|GameplayEffect 等数据蓝图自动提取 CDO 属性配置|
 
 ---
 
@@ -60,7 +60,7 @@ Blueprint Exporter
 
 **Export All Blueprints to Cache**
 
-* 无对话框，直接输出到 `{ProjectDir}/Saved/BlueprintExports/`
+* 无对话框，直接输出到 `{ProjectDir}/BlueprintExports/`
 * 使用双层增量检测，跳过未修改的蓝图
 * 完成后在 Output Log 打印统计：`ExportAll complete: X exported, Y skipped, Z filtered out, N total`
 
@@ -108,7 +108,6 @@ Blueprint Exporter
 |-|-|-|-|
 |`bAutoExportOnSave`|bool|`false`|每次保存蓝图时自动导出到缓存|
 |`bExportOnEditorClose`|bool|`false`|关闭编辑器前执行一次全量导出|
-|`bGenerateCompactFile`|bool|`true`|全量导出时生成 `_compact.txt` 伪代码视图|
 
 ### Export Filter — Blueprint Type
 
@@ -131,7 +130,7 @@ Blueprint Exporter
 
 |属性|类型|默认值|说明|
 |-|-|-|-|
-|`MinNodeCount`|`int32`|`2`|所有图表中节点总数低于此值时跳过导出（过滤空蓝图）|
+|`MinNodeCount`|`int32`|`0`|所有图表中节点总数低于此值时跳过导出（设为 0 可导出 GE 等无节点蓝图）|
 
 ---
 
@@ -140,95 +139,63 @@ Blueprint Exporter
 全量导出（含自动导出）输出到：
 
 ```
-{ProjectDir}/Saved/BlueprintExports/
+{ProjectDir}/BlueprintExports/
 ├── README.md                       ← 所有蓝图的 Markdown 汇总表
 ├── _index.txt                      ← 纯文本索引（蓝图名/父类/图表数/变量数）
 │
 ├── AC_EnemyAI/
-│   ├── _summary.txt                ← 蓝图头部 + 变量 + 图表列表（无节点内容）
-│   ├── _compact.txt                ← 伪代码风格的高层逻辑视图（v8 新增）
+│   ├── _summary.txt                ← 变量 + CDO 配置 + 执行流概览（先读这个）
 │   ├── EventGraph.txt              ← EventGraph 完整内容
 │   └── SetCurrentState.txt         ← 函数图 SetCurrentState 的完整内容
 │
-├── BP_EnemyBase/
-│   ├── _summary.txt
-│   ├── _compact.txt
-│   └── ...
+├── GE_DamageVolume/
+│   └── _summary.txt                ← GE 配置导出（Modifiers/Duration/Tags）
 │
 └── ...
 ```
 
 **文件名规则**：图表名经 `SanitizeFileName()` 处理——只保留字母、数字、`_`、`-`，其余字符替换为 `_`。
 
-### _summary.txt 内容示例（v8 紧凑格式）
+### _summary.txt 内容示例
+
+`_summary.txt` 整合了变量、CDO 配置和执行流概览，是阅读蓝图的入口文件。
+
+**普通蓝图示例**（含图表逻辑）：
 
 ```
-=== Blueprint: AC_EnemyAI (Parent: ActorComponent) ===
+=== Blueprint: BP_DamageVolume (Parent: Actor) ===
 
 === Variables ===
-  CurrentState : EAI_State = Idle
-  OwnerEnemy : ACA_EnemyBase
-
-=== Graphs ===
-  EventGraph (EventGraph) 14 nodes
-  SetCurrentState (Function) 6 nodes
-```
-
-**v8 变化**：移除了对齐空格，从表格对齐改为紧凑列表。
-
-### README.md 内容示例
-
-```markdown
-# Blueprint Exports
-
-Generated: 2026.03.01-10.30.00
-
-| Blueprint | Parent | Graphs | Variables |
-|-----------|--------|--------|-----------|
-| AC_EnemyAI | ActorComponent | 2 | 3 |
-| BP_EnemyBase | ACA_EnemyBase | 1 | 0 |
-```
-
-### _compact.txt 内容示例（v8 新增）
-
-```
-=== AC_EnemyAI (Parent: CA_EnemyAIComponentBase) ===
+  Damage : double = 25.000000
+  DamageGameplayEffectClass : GameplayEffect = GE_DamageVolume
 
 --- EventGraph ---
-[Add Target Event]:
-  Collapsed: Target On Sight
-[Attack Event]:
-  Collapsed: Attack Target
-[BeingLocked]:
-  SetBeingLocked
-[Death Event]:
-  Collapsed: Stop Movement
-[Defend Event]:
-  Collapsed: Strafe Around Target
-[OnReadyToAttack]:
-  CallParentFunction
-  Attack Event
-[OnReadyToDefend]:
-  CallParentFunction
-  StartStrafeTimer
-  Defend Event
+[DamageTick]:
+Macro: Switch Has Authority:
+└ [Authority]:
+  Macro: ForEachLoop:
+  └ [Loop Body]:
+    Cast: GDCharacterBase
+    BRANCH:
+    └ [True]:
+      AbilitySystemBlueprintLibrary::AssignTagSetByCallerMagnitude
+      AbilitySystemComponent::BP_ApplyGameplayEffectSpecToSelf
 [ReceiveBeginPlay]:
-  Collapsed: Begin Play Event
+KismetSystemLibrary::K2_SetTimerDelegate
+```
 
-=== StartStrafe() ===
-BRANCH:
-├ [True]:
-│  ExecutionSequence:
-│  ├ [Then 0]:
-│  │  BRANCH:
-│  │  └ [True]:
-│  │    StartStrafeTimer
-│  │    ComputeStrafeDestination
-│  │    Set: MoveDestination
-│  │    BRANCH:
-│  │    ├ [True]: MoveAI
-│  │    └ [False]: StopStrafe
-│  └ [Then 1]: Match Player Inputs
+**GameplayEffect 蓝图示例**（CDO 配置）：
+
+```
+=== Blueprint: GE_HealthManaStaminaRegenVolume (Parent: GameplayEffect) ===
+
+=== Configuration ===
+  Duration: Infinite
+  Tags.AssetTags: Effect.RemoveOnDeath
+  Modifiers:
+    [0] HealthRegenRate += 20 (ScalableFloat)
+    [1] ManaRegenRate += 20 (ScalableFloat)
+    [2] StaminaRegenRate += 20 (ScalableFloat)
 ```
 
 ---
@@ -256,10 +223,13 @@ BRANCH:
   {SourceNode} [{PinLabel}] --> {TargetNode}
 ```
 
-**v8 变化**：
-- 移除了 Data Flow 独立区块（执行流已包含足够的连接信息）
-- 节点标识改为语义化名称（如 `[GetHealth] (CallFunc)` 代替 `K2Node_CallFunction_123`）
-- 基础类型（bool、int、float）的引脚不显示类型注解
+**v9/v10 变化**：
+- Pin 连接目标使用语义节点名（如 `-> AbilitySystemComponent::MakeEffectContext.Target`）
+- 未连接且无设置值的输入 Pin 不输出（减少噪音）
+- 运算符节点显示具体操作名（如 `KismetMathLibrary::BooleanAND`）
+- 未实现的 Override 事件和空 FunctionEntry 自动过滤
+- Compact 执行流树整合进 `_summary.txt`（不再单独生成 `_compact.txt`）
+- 新增 `=== Configuration ===` 区，导出 CDO 属性配置（GE 专用格式 + 通用 fallback）
 
 ### 5.2 变量格式
 
@@ -379,8 +349,9 @@ v8 使用 `GetSemanticTitle()` 生成人类可读的节点标题：
 8. `category == delegate` 且无连接
 9. `bIsHidden == true` 且无连接且无默认值
 10. Output Pin 且非 exec 且无连接且默认值为空或平凡值
+11. **v9 新增**：Input Pin 且非 exec/delegate 且无连接且默认值为空或平凡值
 
-**v8 新增**：基础类型（`bool`、`int`、`float`、`double`、`byte`、`real`、`string`、`text`、`name`）不显示类型注解。
+基础类型（`bool`、`int`、`float`、`double`、`byte`、`real`、`string`、`text`、`name`）不显示类型注解。
 
 ### 5.8 Execution Flow
 
@@ -484,7 +455,6 @@ FExportedBlueprint (中间 POD 结构)
     ├─▶ FBlueprintTextFormatter::Format()          → 完整单文件文本
     ├─▶ FBlueprintTextFormatter::FormatSummary()   → _summary.txt 内容
     ├─▶ FBlueprintTextFormatter::FormatGraphOnly() → {GraphName}.txt 内容
-    ├─▶ FBlueprintTextFormatter::FormatCompactBlueprint() → _compact.txt 内容（v8 新增）
     └─▶ FBlueprintTextFormatter::FormatSelectedNodes() → 选中节点文本
 ```
 
@@ -497,7 +467,8 @@ PublicDependencyModuleNames:
   ToolMenus, ContentBrowser, DesktopPlatform, AssetTools
 
 PrivateDependencyModuleNames:
-  ApplicationCore, AssetRegistry, DeveloperSettings
+  ApplicationCore, AssetRegistry, DeveloperSettings,
+  GameplayAbilities, GameplayTags
 ```
 
 ### 7.4 菜单注册方式
@@ -571,6 +542,7 @@ struct FExportedBlueprint
     FString ParentClass;    // 去掉 _C 后缀
     TArray<FExportedVariable> Variables;
     TArray<FExportedGraph> Graphs;
+    TArray<TPair<FString, FString>> CDOProperties;  // (SemanticKey, Value)
 };
 ```
 
@@ -612,9 +584,9 @@ CDO 导出的枚举字符串（格式 `EAI_State::NewEnumerator0`）在读取 CD
 
 `SearchAllAssets(bSynchronousSearch=true)` 在首次调用时会阻塞。后续调用（资产注册表已建好）很快。双层增量检测在大项目中可节省 90%+ 的 `GetAsset()` 调用开销。
 
-### 9.7 缓存目录不纳入版本控制
+### 9.7 导出目录
 
-`Saved/BlueprintExports/` 目录通常应加入 `.gitignore`，属于本地临时缓存，不需要提交到版本库。
+导出目录为 `{ProjectDir}/BlueprintExports/`，建议加入 `.gitignore`（不提交到版本库），但**不要**加入 `.cursorignore`（需要被 Cursor 索引以支持 AI 蓝图理解）。
 
 ### 9.8 Claude Code 接入
 
@@ -660,31 +632,27 @@ CDO 导出的枚举字符串（格式 `EAI_State::NewEnumerator0`）在读取 CD
 
 ---
 
-## 附录：v8 更新摘要
+## 附录：版本更新摘要
 
-### 新增功能
+### v10（当前版本）
 
-1. **Compact 模式**：新增 `_compact.txt` 文件，提供伪代码风格的高层逻辑视图
-2. **语义化节点标识**：节点标题从 `K2Node_CallFunction_123` 改为 `[GetHealth] (CallFunc)`
-3. **紧凑格式输出**：
-   - 移除变量声明区的对齐空格
-   - 移除 Graph 列表的对齐空格
-   - 移除 Data Flow 独立区块
-   - 基础类型引脚隐藏类型注解
+- **CDO 配置导出**：GameplayEffect 蓝图自动提取 Duration、Period、Modifiers、Stacking、Tags 等配置
+- **可扩展注册表**：类型专用提取/格式化通过注册表分发，新增 GAS 类型只需写两个函数 + 各加一行
+- **通用 CDO diff**：非 GE 蓝图使用反射递归展开 CDO 非默认属性，输出 dot-notation 格式
+- **新增模块依赖**：GameplayAbilities、GameplayTags
 
-### 性能改进
+### v9
 
-| 蓝图 | 旧版体积 | 新版体积 | 节省 |
-|------|----------|----------|------|
-| AC_EnemyAI | 284,379 字节 | 156,956 字节 | -45% |
-| AC_HitReaction | 221,790 字节 | 169,780 字节 | -23% |
-| ABP_CA_Hero | 250,458 字节 | 185,474 字节 | -25% |
-| **总计** | 11,910,342 字节 | 9,460,332 字节 | **-20.6%** |
+- **语义化连接引用**：Pin 连接目标从节点 ID（`K2Node_CallFunction_5.Target`）改为语义名（`AbilitySystemComponent::MakeEffectContext.Target`）
+- **运算符语义**：`OPERATOR` → `KismetMathLibrary::BooleanAND` 等具体操作名
+- **输入 Pin 过滤**：未连接且无设置值的输入 Pin 不输出
+- **空节点过滤**：未实现的 Override 事件和空 FunctionEntry 自动移除
+- **Compact 合并**：执行流树整合进 `_summary.txt`，不再生成独立 `_compact.txt`
+- **导出目录迁移**：从 `Saved/BlueprintExports/` 移至 `BlueprintExports/`（可被 Cursor 索引）
+- **Reroute 双向解析**：数据连接的 K2Node_Knot 在输入和输出方向均自动穿透
 
-### 兼容性
+### v8
 
-v8 完全向后兼容：
-- 导出目录结构不变
-- `_summary.txt` 格式仅移除对齐空格，内容不变
-- 单个 Graph 文件的执行流格式保持一致（仅节点标识更语义化）
-- `_compact.txt` 是新增文件，不影响现有读取逻辑
+- **Compact 模式**：伪代码风格的高层逻辑视图
+- **语义化节点标识**：`[GetHealth] (CallFunc)` 代替 `K2Node_CallFunction_123`
+- **紧凑格式**：移除对齐空格、Data Flow 区块，基础类型隐藏类型注解
