@@ -118,7 +118,7 @@ FString FBlueprintTextFormatter::FormatGraph(const FExportedGraph& Graph)
 		{
 			continue;
 		}
-		Lines.Add(FormatNode(Node));
+		Lines.Add(FormatNode(Node, NodeMap));
 	}
 
 	// Execution flow
@@ -138,7 +138,7 @@ FString FBlueprintTextFormatter::FormatGraph(const FExportedGraph& Graph)
 	return FString::Join(Lines, TEXT("\n"));
 }
 
-FString FBlueprintTextFormatter::FormatNode(const FExportedNode& Node)
+FString FBlueprintTextFormatter::FormatNode(const FExportedNode& Node, const TMap<FString, const FExportedNode*>& NodeMap)
 {
 	TArray<FString> Lines;
 
@@ -181,7 +181,7 @@ FString FBlueprintTextFormatter::FormatNode(const FExportedNode& Node)
 	TArray<FExportedPin> VisiblePins = GetMeaningfulPins(Node);
 	for (const FExportedPin& Pin : VisiblePins)
 	{
-		FString PinStr = FormatPin(Pin);
+		FString PinStr = FormatPin(Pin, NodeMap);
 		if (!PinStr.IsEmpty())
 		{
 			Lines.Add(FString::Printf(TEXT("  %s"), *PinStr));
@@ -206,7 +206,7 @@ FString FBlueprintTextFormatter::FormatNode(const FExportedNode& Node)
 	return FString::Join(Lines, TEXT("\n"));
 }
 
-FString FBlueprintTextFormatter::FormatPin(const FExportedPin& Pin)
+FString FBlueprintTextFormatter::FormatPin(const FExportedPin& Pin, const TMap<FString, const FExportedNode*>& NodeMap)
 {
 	// Direction arrow
 	const TCHAR* Arrow = Pin.Direction == TEXT("Output") ? TEXT("\u2192") : TEXT("\u2190");
@@ -239,15 +239,40 @@ FString FBlueprintTextFormatter::FormatPin(const FExportedPin& Pin)
 		Default = FString::Printf(TEXT(" = %s"), *Pin.DefaultValue);
 	}
 
-	// Connection targets
+	// Connection targets — resolve reroutes and use semantic titles
 	FString Connection;
 	if (Pin.LinkedTo.Num() > 0)
 	{
 		TArray<FString> Targets;
 		for (const auto& Link : Pin.LinkedTo)
 		{
-			FString TargetStr = FString::Printf(TEXT("%s.%s"), *Link.Key, *Link.Value);
-			if (!SelectionContext.IsEmpty() && !SelectionContext.Contains(Link.Key))
+			FString TargetNodeName = Link.Key;
+			FString TargetPinName = Link.Value;
+
+			// Resolve reroute chains: forward for output pins, backward for input pins
+			if (Pin.Direction == TEXT("Output"))
+			{
+				auto Resolved = ResolveRerouteChain(TargetNodeName, TargetPinName, NodeMap);
+				TargetNodeName = Resolved.Key;
+				TargetPinName = Resolved.Value;
+			}
+			else
+			{
+				auto Resolved = ResolveRerouteChainBackward(TargetNodeName, TargetPinName, NodeMap);
+				TargetNodeName = Resolved.Key;
+				TargetPinName = Resolved.Value;
+			}
+
+			// Replace node ID with semantic title
+			FString TargetTitle = TargetNodeName;
+			const FExportedNode* const* TargetPtr = NodeMap.Find(TargetNodeName);
+			if (TargetPtr && *TargetPtr)
+			{
+				TargetTitle = GetSemanticTitle(**TargetPtr);
+			}
+
+			FString TargetStr = FString::Printf(TEXT("%s.%s"), *TargetTitle, *TargetPinName);
+			if (!SelectionContext.IsEmpty() && !SelectionContext.Contains(TargetNodeName))
 			{
 				TargetStr += TEXT(" (external)");
 			}
@@ -382,7 +407,10 @@ FString FBlueprintTextFormatter::GetSemanticTitle(const FExportedNode& Node) con
 	{
 		return PrimaryValue;
 	}
-	if (NodeClass == TEXT("K2Node_CallFunction") || NodeClass == TEXT("K2Node_CallArrayFunction"))
+	if (NodeClass == TEXT("K2Node_CallFunction")
+		|| NodeClass == TEXT("K2Node_CallArrayFunction")
+		|| NodeClass == TEXT("K2Node_CommutativeAssociativeBinaryOperator")
+		|| NodeClass == TEXT("K2Node_PromotableOperator"))
 	{
 		return PrimaryValue;
 	}
@@ -606,6 +634,16 @@ TArray<FExportedPin> FBlueprintTextFormatter::GetMeaningfulPins(const FExportedN
 			continue;
 		}
 
+		// Skip unconnected input data pins with no meaningful value set
+		if (Pin.Direction == TEXT("Input")
+			&& Pin.Category != TEXT("exec")
+			&& Pin.Category != TEXT("delegate")
+			&& Pin.LinkedTo.Num() == 0
+			&& (Pin.DefaultValue.IsEmpty() || IsTrivialDefault(Pin.DefaultValue)))
+		{
+			continue;
+		}
+
 		// Skip unconnected non-exec output pins with no meaningful default (not consumed by any node)
 		if (Pin.Direction == TEXT("Output")
 			&& Pin.Category != TEXT("exec")
@@ -677,6 +715,53 @@ TPair<FString, FString> FBlueprintTextFormatter::ResolveRerouteChain(const FStri
 		}
 
 		if (!bFoundNext)
+		{
+			break;
+		}
+	}
+
+	return TPair<FString, FString>(Current, CurrentPinName);
+}
+
+TPair<FString, FString> FBlueprintTextFormatter::ResolveRerouteChainBackward(const FString& NodeName, const FString& OriginalPinName, const TMap<FString, const FExportedNode*>& NodeMap)
+{
+	TSet<FString> Visited;
+	FString Current = NodeName;
+	FString CurrentPinName = OriginalPinName;
+
+	while (true)
+	{
+		const FExportedNode* const* NodePtr = NodeMap.Find(Current);
+		if (!NodePtr || !*NodePtr)
+		{
+			break;
+		}
+
+		const FExportedNode& Node = **NodePtr;
+		if (Node.NodeClass != TEXT("K2Node_Knot"))
+		{
+			break;
+		}
+
+		if (Visited.Contains(Current))
+		{
+			break;
+		}
+		Visited.Add(Current);
+
+		bool bFoundPrev = false;
+		for (const FExportedPin& Pin : Node.Pins)
+		{
+			if (Pin.Direction == TEXT("Input") && Pin.LinkedTo.Num() > 0)
+			{
+				Current = Pin.LinkedTo[0].Key;
+				CurrentPinName = Pin.LinkedTo[0].Value;
+				bFoundPrev = true;
+				break;
+			}
+		}
+
+		if (!bFoundPrev)
 		{
 			break;
 		}
@@ -771,13 +856,15 @@ FString FBlueprintTextFormatter::FormatSummary(const FExportedBlueprint& Bluepri
 		}
 	}
 
-	// Graph list table
-	Lines.Add(TEXT("=== Graphs ==="));
-
-	for (const FExportedGraph& G : Blueprint.Graphs)
+	// Compact execution flow for each graph
+	for (const FExportedGraph& Graph : Blueprint.Graphs)
 	{
-		Lines.Add(FString::Printf(TEXT("  %s (%s) %d nodes"),
-			*G.GraphName, *G.GraphType, G.Nodes.Num()));
+		FString CompactGraph = FormatCompactGraph(Graph);
+		if (!CompactGraph.IsEmpty())
+		{
+			Lines.Add(CompactGraph);
+			Lines.Add(TEXT(""));
+		}
 	}
 
 	return FString::Join(Lines, TEXT("\n")).TrimEnd();
@@ -821,7 +908,7 @@ FString FBlueprintTextFormatter::FormatSelectedNodes(const FExportedGraph& Graph
 		{
 			continue;
 		}
-		Lines.Add(FormatNode(Node));
+		Lines.Add(FormatNode(Node, NodeMap));
 	}
 
 	// Execution flow

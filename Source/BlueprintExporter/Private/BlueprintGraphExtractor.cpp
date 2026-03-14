@@ -160,12 +160,22 @@ FExportedBlueprint FBlueprintGraphExtractor::Extract(UBlueprint* Blueprint)
 		Result.Variables.Add(MoveTemp(Var));
 	}
 
+	// Helper: add graph only if it has nodes after filtering
+	auto AddGraphIfNonEmpty = [&](UEdGraph* Graph, const FString& Type)
+	{
+		FExportedGraph ExGraph = ExtractGraph(Graph, Type);
+		if (ExGraph.Nodes.Num() > 0)
+		{
+			Result.Graphs.Add(MoveTemp(ExGraph));
+		}
+	};
+
 	// EventGraph(s)
 	for (UEdGraph* Graph : Blueprint->UbergraphPages)
 	{
 		if (Graph)
 		{
-			Result.Graphs.Add(ExtractGraph(Graph, TEXT("EventGraph")));
+			AddGraphIfNonEmpty(Graph, TEXT("EventGraph"));
 		}
 	}
 
@@ -174,7 +184,7 @@ FExportedBlueprint FBlueprintGraphExtractor::Extract(UBlueprint* Blueprint)
 	{
 		if (Graph)
 		{
-			Result.Graphs.Add(ExtractGraph(Graph, TEXT("Function")));
+			AddGraphIfNonEmpty(Graph, TEXT("Function"));
 		}
 	}
 
@@ -183,7 +193,7 @@ FExportedBlueprint FBlueprintGraphExtractor::Extract(UBlueprint* Blueprint)
 	{
 		if (Graph)
 		{
-			Result.Graphs.Add(ExtractGraph(Graph, TEXT("Macro")));
+			AddGraphIfNonEmpty(Graph, TEXT("Macro"));
 		}
 	}
 
@@ -194,7 +204,7 @@ FExportedBlueprint FBlueprintGraphExtractor::Extract(UBlueprint* Blueprint)
 		{
 			if (Graph)
 			{
-				Result.Graphs.Add(ExtractGraph(Graph, TEXT("Interface")));
+				AddGraphIfNonEmpty(Graph, TEXT("Interface"));
 			}
 		}
 	}
@@ -223,6 +233,56 @@ FExportedGraph FBlueprintGraphExtractor::ExtractGraph(UEdGraph* Graph, const FSt
 
 		Result.Nodes.Add(ExtractNode(Node, Result.GraphName));
 	}
+
+	// Filter out stub nodes: unimplemented override events and disconnected function entries
+	Result.Nodes.RemoveAll([](const FExportedNode& Node)
+	{
+		// Unimplemented override events (UE auto-creates these stubs)
+		if (Node.NodeClass == TEXT("K2Node_Event"))
+		{
+			bool bIsOverride = false;
+			for (const auto& Prop : Node.Properties)
+			{
+				if (Prop.Key == TEXT("Override") && Prop.Value == TEXT("true"))
+				{
+					bIsOverride = true;
+					break;
+				}
+			}
+			if (!bIsOverride)
+			{
+				return false;
+			}
+
+			for (const FExportedPin& Pin : Node.Pins)
+			{
+				if (Pin.Category == TEXT("exec")
+					&& Pin.Direction == TEXT("Output")
+					&& Pin.LinkedTo.Num() > 0)
+				{
+					return false;
+				}
+			}
+			return true;
+		}
+
+		// Empty function entry nodes (e.g. default UserConstructionScript)
+		if (Node.NodeClass == TEXT("K2Node_FunctionEntry"))
+		{
+			for (const FExportedPin& Pin : Node.Pins)
+			{
+				if (Pin.Category == TEXT("exec")
+					&& Pin.Direction == TEXT("Output")
+					&& Pin.LinkedTo.Num() > 0)
+				{
+					return false;
+				}
+			}
+			return true;
+		}
+
+		return false;
+	});
 
 	return Result;
 }

@@ -527,7 +527,7 @@ bool FBlueprintExporterModule::ExportBlueprintToCache(UBlueprint* Blueprint)
 
 	const FString BPName = Blueprint->GetName();
 	const FString OutputDir = FPaths::Combine(
-		FPaths::ProjectSavedDir(), TEXT("BlueprintExports"), BPName);
+		FPaths::ProjectDir(), TEXT("BlueprintExports"), BPName);
 
 	IFileManager::Get().MakeDirectory(*OutputDir, /*Tree=*/true);
 
@@ -550,24 +550,12 @@ bool FBlueprintExporterModule::ExportBlueprintToCache(UBlueprint* Blueprint)
 		}
 	}
 
-	// Write summary file
+	// Write summary file (includes compact execution flow)
 	const FString SummaryText = Formatter.FormatSummary(ExportedBP);
 	const FString SummaryPath = FPaths::Combine(OutputDir, TEXT("_summary.txt"));
 	if (WriteFileIfChanged(SummaryPath, SummaryText))
 	{
 		FilesWritten++;
-	}
-
-	// Write compact file (if enabled)
-	const UBlueprintExporterSettings* Settings = GetDefault<UBlueprintExporterSettings>();
-	if (Settings && Settings->bGenerateCompactFile)
-	{
-		const FString CompactText = Formatter.FormatCompactBlueprint(ExportedBP);
-		const FString CompactPath = FPaths::Combine(OutputDir, TEXT("_compact.txt"));
-		if (WriteFileIfChanged(CompactPath, CompactText))
-		{
-			FilesWritten++;
-		}
 	}
 
 	if (FilesWritten > 0)
@@ -597,7 +585,7 @@ void FBlueprintExporterModule::ExportAllBlueprints()
 		UBlueprint::StaticClass()->GetClassPathName(), BPAssets, /*bSearchSubClasses=*/true);
 
 	const UBlueprintExporterSettings* Settings = GetDefault<UBlueprintExporterSettings>();
-	const FString ExportDir = FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("BlueprintExports"));
+	const FString ExportDir = FPaths::Combine(FPaths::ProjectDir(), TEXT("BlueprintExports"));
 
 	TSet<FString> CurrentBPNames;
 	int32 ExportedCount = 0;
@@ -660,7 +648,7 @@ void FBlueprintExporterModule::ExportAllBlueprints()
 
 void FBlueprintExporterModule::GenerateIndexFile()
 {
-	const FString BaseDir = FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("BlueprintExports"));
+	const FString BaseDir = FPaths::Combine(FPaths::ProjectDir(), TEXT("BlueprintExports"));
 
 	TArray<FString> SubDirs;
 	IFileManager::Get().FindFiles(SubDirs, *(BaseDir / TEXT("*")), /*bFiles=*/false, /*bDirectories=*/true);
@@ -707,7 +695,6 @@ void FBlueprintExporterModule::GenerateIndexFile()
 		SummaryContent.ParseIntoArrayLines(SummaryLines);
 
 		bool bInVarSection = false;
-		bool bInGraphSection = false;
 
 		for (const FString& Line : SummaryLines)
 		{
@@ -723,7 +710,7 @@ void FBlueprintExporterModule::GenerateIndexFile()
 				if (ParenIdx != INDEX_NONE)
 				{
 					BPName = Temp.Left(ParenIdx).TrimEnd();
-					ParentName = Temp.Mid(ParenIdx + 8); // skip "(Parent:"
+					ParentName = Temp.Mid(ParenIdx + 8);
 					ParentName.RemoveFromEnd(TEXT(")"));
 					ParentName.TrimStartAndEndInline();
 				}
@@ -732,29 +719,19 @@ void FBlueprintExporterModule::GenerateIndexFile()
 					BPName = Temp.TrimStartAndEnd();
 				}
 				bInVarSection = false;
-				bInGraphSection = false;
 				continue;
 			}
 
 			if (Line == TEXT("=== Variables ==="))
 			{
 				bInVarSection = true;
-				bInGraphSection = false;
 				continue;
 			}
 
-			if (Line == TEXT("=== Graphs ==="))
+			// Any other === or --- header ends variable section
+			if (Line.StartsWith(TEXT("===")) || Line.StartsWith(TEXT("---")))
 			{
 				bInVarSection = false;
-				bInGraphSection = true;
-				continue;
-			}
-
-			if (Line.StartsWith(TEXT("===")))
-			{
-				bInVarSection = false;
-				bInGraphSection = false;
-				continue;
 			}
 
 			if (bInVarSection && Line.StartsWith(TEXT("  ")) && !Line.TrimStart().IsEmpty())
@@ -762,7 +739,14 @@ void FBlueprintExporterModule::GenerateIndexFile()
 				++VarCount;
 			}
 
-			if (bInGraphSection && Line.StartsWith(TEXT("  ")) && !Line.TrimStart().IsEmpty())
+			// Count graph headers: "--- EventGraph ---" or "=== FuncSig(...) ==="
+			if (Line.StartsWith(TEXT("--- ")) && Line.EndsWith(TEXT(" ---")))
+			{
+				++GraphCount;
+			}
+			else if (Line.StartsWith(TEXT("=== ")) && Line.EndsWith(TEXT(" ==="))
+				&& Line.Contains(TEXT("("))
+				&& !Line.StartsWith(TEXT("=== Blueprint:")))
 			{
 				++GraphCount;
 			}
@@ -799,7 +783,7 @@ void FBlueprintExporterModule::GenerateIndexFile()
 
 void FBlueprintExporterModule::CleanupStaleExports(const TSet<FString>& CurrentBPNames)
 {
-	const FString BaseDir = FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("BlueprintExports"));
+	const FString BaseDir = FPaths::Combine(FPaths::ProjectDir(), TEXT("BlueprintExports"));
 
 	TArray<FString> SubDirs;
 	IFileManager::Get().FindFiles(SubDirs, *(BaseDir / TEXT("*")), /*bFiles=*/false, /*bDirectories=*/true);
