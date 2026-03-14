@@ -42,5 +42,8 @@ private:
 		TSet<FString>& Visited);
 	bool HasExecPins(const FExportedNode& Node) const;
 
+	// CDO Configuration formatting
+	FString FormatConfiguration(const TArray<TPair<FString, FString>>& CDOProperties, const FString& ParentClass);
+
 	TSet<FString> SelectionContext; // Empty = full export; non-empty = selection mode
 };

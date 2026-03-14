@@ -30,6 +30,8 @@ public class BlueprintExporter : ModuleRules
 			"ApplicationCore",
 			"AssetRegistry",
 			"DeveloperSettings",
+			"GameplayAbilities",
+			"GameplayTags",
 		});
 	}
 }

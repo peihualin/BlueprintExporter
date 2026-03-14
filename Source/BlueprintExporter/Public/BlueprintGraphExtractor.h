@@ -8,6 +8,14 @@ class UBlueprint;
 class UEdGraph;
 class UEdGraphNode;
 
+using FConfigExtractFunc = void(*)(UObject* CDO, TArray<TPair<FString, FString>>& OutConfig);
+
+struct FConfigExtractorEntry
+{
+	UClass* ParentClass;
+	FConfigExtractFunc ExtractFunc;
+};
+
 class FBlueprintGraphExtractor
 {
 public:
@@ -24,4 +32,17 @@ private:
 	FExportedPin ExtractPin(UEdGraphPin* Pin);
 
 	static FString ResolveVariableType(const FEdGraphPinType& PinType);
+
+	// Generic CDO diff: exports non-default properties as flattened dot-notation
+	static void ExtractCDOProperties(
+		UObject* CDO, UObject* ParentCDO,
+		const TSet<FName>& BlueprintVarNames,
+		TArray<TPair<FString, FString>>& OutProperties);
+
+	static void FlattenProperty(
+		FProperty* Prop, const void* ValuePtr, const void* DefaultPtr,
+		const FString& Prefix,
+		TArray<TPair<FString, FString>>& OutProperties);
+
+	static FString ExportLeafValue(FProperty* Prop, const void* ValuePtr);
 };

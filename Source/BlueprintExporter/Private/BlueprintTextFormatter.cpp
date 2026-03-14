@@ -856,6 +856,17 @@ FString FBlueprintTextFormatter::FormatSummary(const FExportedBlueprint& Bluepri
 		}
 	}
 
+	// CDO Configuration section
+	if (Blueprint.CDOProperties.Num() > 0)
+	{
+		FString ConfigSection = FormatConfiguration(Blueprint.CDOProperties, Blueprint.ParentClass);
+		if (!ConfigSection.IsEmpty())
+		{
+			Lines.Add(ConfigSection);
+			Lines.Add(TEXT(""));
+		}
+	}
+
 	// Compact execution flow for each graph
 	for (const FExportedGraph& Graph : Blueprint.Graphs)
 	{
@@ -1275,4 +1286,93 @@ FString FBlueprintTextFormatter::FormatCompactChain(
 	}
 
 	return FString::Join(Lines, TEXT("\n"));
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// CDO Configuration Formatting
+// ────────────────────────────────────────────────────────────────────────────
+
+using FConfigFormatFunc = FString(*)(const TArray<TPair<FString, FString>>&);
+
+static FString FormatGameplayEffectConfig(const TArray<TPair<FString, FString>>& Config)
+{
+	TArray<FString> Lines;
+	Lines.Add(TEXT("=== Configuration ==="));
+
+	TMap<FString, TArray<TPair<int32, FString>>> ArrayGroups;
+	TArray<TPair<FString, FString>> Scalars;
+
+	for (const auto& Pair : Config)
+	{
+		int32 BracketIdx = Pair.Key.Find(TEXT("["));
+		if (BracketIdx != INDEX_NONE)
+		{
+			FString Prefix = Pair.Key.Left(BracketIdx);
+			FString IndexStr = Pair.Key.Mid(BracketIdx + 1);
+			IndexStr.RemoveFromEnd(TEXT("]"));
+			int32 Index = FCString::Atoi(*IndexStr);
+			ArrayGroups.FindOrAdd(Prefix).Add(TPair<int32, FString>(Index, Pair.Value));
+		}
+		else
+		{
+			Scalars.Add(Pair);
+		}
+	}
+
+	for (const auto& Pair : Scalars)
+	{
+		Lines.Add(FString::Printf(TEXT("  %s: %s"), *Pair.Key, *Pair.Value));
+	}
+
+	for (const auto& Group : ArrayGroups)
+	{
+		Lines.Add(FString::Printf(TEXT("  %s:"), *Group.Key));
+		for (const auto& Item : Group.Value)
+		{
+			Lines.Add(FString::Printf(TEXT("    [%d] %s"), Item.Key, *Item.Value));
+		}
+	}
+
+	return FString::Join(Lines, TEXT("\n"));
+}
+
+static FString FormatGenericConfig(const TArray<TPair<FString, FString>>& Config)
+{
+	TArray<FString> Lines;
+	Lines.Add(TEXT("=== Configuration ==="));
+
+	for (const auto& Pair : Config)
+	{
+		Lines.Add(FString::Printf(TEXT("  %s = %s"), *Pair.Key, *Pair.Value));
+	}
+
+	return FString::Join(Lines, TEXT("\n"));
+}
+
+static const TMap<FString, FConfigFormatFunc>& GetConfigFormatterRegistry()
+{
+	static TMap<FString, FConfigFormatFunc> Registry = {
+		{ TEXT("GameplayEffect"), &FormatGameplayEffectConfig },
+	};
+	return Registry;
+}
+
+FString FBlueprintTextFormatter::FormatConfiguration(
+	const TArray<TPair<FString, FString>>& CDOProperties,
+	const FString& ParentClass)
+{
+	if (CDOProperties.Num() == 0)
+	{
+		return FString();
+	}
+
+	for (const auto& Entry : GetConfigFormatterRegistry())
+	{
+		if (ParentClass.Contains(Entry.Key))
+		{
+			return Entry.Value(CDOProperties);
+		}
+	}
+
+	return FormatGenericConfig(CDOProperties);
 }

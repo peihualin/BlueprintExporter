@@ -54,4 +54,8 @@ struct FExportedBlueprint
 	FString ParentClass;
 	TArray<FExportedVariable> Variables;
 	TArray<FExportedGraph> Graphs;
+
+	// CDO configuration properties: (SemanticKey, Value)
+	// Populated by type-specific extractors or generic CDO diff
+	TArray<TPair<FString, FString>> CDOProperties;
 };

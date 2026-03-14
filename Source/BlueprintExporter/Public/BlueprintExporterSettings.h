@@ -37,7 +37,7 @@ public:
 	UPROPERTY(Config, EditAnywhere, Category="Export Filter|Parent Class", meta=(AllowAbstract="true"))
 	TArray<FSoftClassPath> ExcludedParentClasses;   // Blacklist, takes priority over whitelist
 
-	// Content Filter
-	UPROPERTY(Config, EditAnywhere, Category="Export Filter|Content", meta=(ClampMin=1, ClampMax=100))
-	int32 MinNodeCount = 2;
+	// Content Filter (set to 0 to export all blueprints including GE with no graph logic)
+	UPROPERTY(Config, EditAnywhere, Category="Export Filter|Content", meta=(ClampMin=0, ClampMax=100))
+	int32 MinNodeCount = 0;
 };
