@@ -18,12 +18,137 @@
 #include "K2Node_ComponentBoundEvent.h"
 #include "K2Node_Composite.h"
 
+#include "Abilities/GameplayAbility.h"
+#include "Abilities/GameplayAbilityTypes.h"
 #include "GameplayEffect.h"
 #include "GameplayEffectExecutionCalculation.h"
+#include "GameplayModMagnitudeCalculation.h"
+#include "GameplayEffectComponents/AbilitiesGameplayEffectComponent.h"
+#include "GameplayEffectComponents/AssetTagsGameplayEffectComponent.h"
+#include "GameplayEffectComponents/BlockAbilityTagsGameplayEffectComponent.h"
+#include "GameplayEffectComponents/ImmunityGameplayEffectComponent.h"
+#include "GameplayEffectComponents/RemoveOtherGameplayEffectComponent.h"
+#include "GameplayEffectComponents/TargetTagRequirementsGameplayEffectComponent.h"
+#include "GameplayEffectComponents/TargetTagsGameplayEffectComponent.h"
 #include "GameplayTagContainer.h"
 #include "UObject/UnrealType.h"
 
 static const TArray<FConfigExtractorEntry>& GetConfigExtractorRegistry();
+static void ExtractGameplayEffectConfigRaw(UObject* CDO, TArray<TPair<FString, FString>>& Out);
+static void ExtractGameplayAbilityConfigRaw(UObject* CDO, TArray<TPair<FString, FString>>& Out);
+
+static FString StripGeneratedClassSuffix(FString Name)
+{
+	if (Name.EndsWith(TEXT("_C")))
+	{
+		Name.LeftChopInline(2);
+	}
+	return Name;
+}
+
+template<typename TClass>
+static FString ExportClassName(const TSubclassOf<TClass>& Class)
+{
+	return StripGeneratedClassSuffix(GetNameSafe(Class.Get()));
+}
+
+static FString GetTopLevelConfigKey(const FString& Key)
+{
+	int32 DotIndex = INDEX_NONE;
+	int32 BracketIndex = INDEX_NONE;
+	Key.FindChar(TEXT('.'), DotIndex);
+	Key.FindChar(TEXT('['), BracketIndex);
+
+	int32 EndIndex = INDEX_NONE;
+	if (DotIndex != INDEX_NONE && BracketIndex != INDEX_NONE)
+	{
+		EndIndex = FMath::Min(DotIndex, BracketIndex);
+	}
+	else if (DotIndex != INDEX_NONE)
+	{
+		EndIndex = DotIndex;
+	}
+	else if (BracketIndex != INDEX_NONE)
+	{
+		EndIndex = BracketIndex;
+	}
+
+	return EndIndex == INDEX_NONE ? Key : Key.Left(EndIndex);
+}
+
+template<typename StructType>
+static const StructType* GetStructFieldPtr(const void* Container, const UScriptStruct* OwnerStruct, const TCHAR* FieldName)
+{
+	const FStructProperty* StructProp = FindFProperty<FStructProperty>(OwnerStruct, FieldName);
+	if (!StructProp)
+	{
+		return nullptr;
+	}
+
+	return StructProp->ContainerPtrToValuePtr<StructType>(Container);
+}
+
+template<typename StructType>
+static const StructType* GetObjectStructFieldPtr(const UObject* Object, const TCHAR* FieldName)
+{
+	const FStructProperty* StructProp = FindFProperty<FStructProperty>(Object->GetClass(), FieldName);
+	if (!StructProp)
+	{
+		return nullptr;
+	}
+
+	return StructProp->ContainerPtrToValuePtr<StructType>(Object);
+}
+
+template<typename ElementType>
+static const TArray<ElementType>* GetObjectArrayFieldPtr(const UObject* Object, const TCHAR* FieldName)
+{
+	const FArrayProperty* ArrayProp = FindFProperty<FArrayProperty>(Object->GetClass(), FieldName);
+	if (!ArrayProp)
+	{
+		return nullptr;
+	}
+
+	return ArrayProp->ContainerPtrToValuePtr<TArray<ElementType>>(Object);
+}
+
+static bool GetObjectBoolField(const UObject* Object, const TCHAR* FieldName)
+{
+	const FBoolProperty* BoolProp = FindFProperty<FBoolProperty>(Object->GetClass(), FieldName);
+	return BoolProp ? BoolProp->GetPropertyValue_InContainer(Object) : false;
+}
+
+static FString GetObjectClassFieldName(const UObject* Object, const TCHAR* FieldName)
+{
+	const FClassProperty* ClassProp = FindFProperty<FClassProperty>(Object->GetClass(), FieldName);
+	if (!ClassProp)
+	{
+		return FString();
+	}
+
+	return StripGeneratedClassSuffix(GetNameSafe(ClassProp->GetPropertyValue_InContainer(Object)));
+}
+
+static void AppendConfigDiff(
+	const TArray<TPair<FString, FString>>& CurrentConfig,
+	const TArray<TPair<FString, FString>>& ParentConfig,
+	TArray<TPair<FString, FString>>& OutConfig)
+{
+	TMap<FString, FString> ParentValues;
+	for (const TPair<FString, FString>& Pair : ParentConfig)
+	{
+		ParentValues.Add(Pair.Key, Pair.Value);
+	}
+
+	for (const TPair<FString, FString>& Pair : CurrentConfig)
+	{
+		const FString* ParentValue = ParentValues.Find(Pair.Key);
+		if (!ParentValue || *ParentValue != Pair.Value)
+		{
+			OutConfig.Add(Pair);
+		}
+	}
+}
 
 FExportedBlueprint FBlueprintGraphExtractor::Extract(UBlueprint* Blueprint)
 {
@@ -35,6 +160,7 @@ FExportedBlueprint FBlueprintGraphExtractor::Extract(UBlueprint* Blueprint)
 	}
 
 	Result.BlueprintName = Blueprint->GetName();
+	Result.ConfigType = TEXT("Generic");
 
 	if (Blueprint->ParentClass)
 	{
@@ -48,8 +174,11 @@ FExportedBlueprint FBlueprintGraphExtractor::Extract(UBlueprint* Blueprint)
 	}
 
 	// Variables
+	TSet<FName> BPVarNames;
 	for (const FBPVariableDescription& VarDesc : Blueprint->NewVariables)
 	{
+		BPVarNames.Add(VarDesc.VarName);
+
 		FExportedVariable Var;
 		Var.Name = VarDesc.VarName.ToString();
 		Var.Type = ResolveVariableType(VarDesc.VarType);
@@ -231,20 +360,59 @@ FExportedBlueprint FBlueprintGraphExtractor::Extract(UBlueprint* Blueprint)
 			{
 				if (Blueprint->ParentClass->IsChildOf(Entry.ParentClass))
 				{
-					Entry.ExtractFunc(CDO, Result.CDOProperties);
+					Entry.ExtractFunc(CDO, ParentCDO, Result.CDOProperties);
+					Result.ConfigType = Entry.ConfigType;
+
+					if (UBlueprint* ParentBlueprint = Cast<UBlueprint>(Blueprint->ParentClass->ClassGeneratedBy))
+					{
+						Result.ParentConfigSource = ParentBlueprint->GetName();
+					}
+
 					bHandled = true;
 					break;
+				}
+			}
+
+			if (bHandled && Result.ConfigType == TEXT("GameplayAbility"))
+			{
+				TArray<TPair<FString, FString>> GenericProperties;
+				ExtractCDOProperties(CDO, ParentCDO, BPVarNames, GenericProperties);
+
+				const TSet<FString> ExcludedTopLevelKeys = {
+					TEXT("AbilityTags"),
+					TEXT("ReplicationPolicy"),
+					TEXT("InstancingPolicy"),
+					TEXT("bServerRespectsRemoteAbilityCancellation"),
+					TEXT("bRetriggerInstancedAbility"),
+					TEXT("bReplicateInputDirectly"),
+					TEXT("NetExecutionPolicy"),
+					TEXT("NetSecurityPolicy"),
+					TEXT("CostGameplayEffectClass"),
+					TEXT("CooldownGameplayEffectClass"),
+					TEXT("AbilityTriggers"),
+					TEXT("CancelAbilitiesWithTag"),
+					TEXT("BlockAbilitiesWithTag"),
+					TEXT("ActivationOwnedTags"),
+					TEXT("ActivationRequiredTags"),
+					TEXT("ActivationBlockedTags"),
+					TEXT("SourceRequiredTags"),
+					TEXT("SourceBlockedTags"),
+					TEXT("TargetRequiredTags"),
+					TEXT("TargetBlockedTags"),
+				};
+
+				for (const TPair<FString, FString>& Pair : GenericProperties)
+				{
+					if (!ExcludedTopLevelKeys.Contains(GetTopLevelConfigKey(Pair.Key)))
+					{
+						Result.CDOProperties.Add(Pair);
+					}
 				}
 			}
 
 			// Fallback to generic CDO diff
 			if (!bHandled)
 			{
-				TSet<FName> BPVarNames;
-				for (const FBPVariableDescription& VarDesc : Blueprint->NewVariables)
-				{
-					BPVarNames.Add(VarDesc.VarName);
-				}
 				ExtractCDOProperties(CDO, ParentCDO, BPVarNames, Result.CDOProperties);
 			}
 		}
@@ -671,9 +839,41 @@ static FString MagnitudeToString(const FGameplayEffectModifierMagnitude& Mag)
 		return FString::Printf(TEXT("%g (ScalableFloat)"), Value);
 	}
 	case EGameplayEffectMagnitudeCalculation::AttributeBased:
-		return TEXT("(AttributeBased)");
+	{
+		const FAttributeBasedFloat* AttributeBased = GetStructFieldPtr<FAttributeBasedFloat>(
+			&Mag, FGameplayEffectModifierMagnitude::StaticStruct(), TEXT("AttributeBasedMagnitude"));
+		if (!AttributeBased)
+		{
+			return TEXT("(AttributeBased)");
+		}
+
+		FString Result = FString::Printf(TEXT("AttributeBased(%s)"),
+			*AttributeBased->BackingAttribute.ToSimpleString());
+
+		if (AttributeBased->Coefficient.GetValueAtLevel(1.f) != 1.f)
+		{
+			Result += FString::Printf(TEXT(" | Coefficient: %g"), AttributeBased->Coefficient.GetValueAtLevel(1.f));
+		}
+		if (AttributeBased->PreMultiplyAdditiveValue.GetValueAtLevel(1.f) != 0.f)
+		{
+			Result += FString::Printf(TEXT(" | PreAdd: %g"), AttributeBased->PreMultiplyAdditiveValue.GetValueAtLevel(1.f));
+		}
+		if (AttributeBased->PostMultiplyAdditiveValue.GetValueAtLevel(1.f) != 0.f)
+		{
+			Result += FString::Printf(TEXT(" | PostAdd: %g"), AttributeBased->PostMultiplyAdditiveValue.GetValueAtLevel(1.f));
+		}
+
+		return Result;
+	}
 	case EGameplayEffectMagnitudeCalculation::CustomCalculationClass:
-		return TEXT("(CustomCalculation)");
+	{
+		FString Result = TEXT("CustomCalculation");
+		if (const UClass* CalcClass = Mag.GetCustomMagnitudeCalculationClass())
+		{
+			Result += FString::Printf(TEXT("(%s)"), *StripGeneratedClassSuffix(CalcClass->GetName()));
+		}
+		return Result;
+	}
 	case EGameplayEffectMagnitudeCalculation::SetByCaller:
 	{
 		FName DataName;
@@ -691,6 +891,70 @@ static FString MagnitudeToString(const FGameplayEffectModifierMagnitude& Mag)
 	}
 	default:
 		return TEXT("(Unknown)");
+	}
+}
+
+static FString ScalableFloatToString(const FScalableFloat& Value)
+{
+	return FString::Printf(TEXT("%g (ScalableFloat)"), Value.GetValueAtLevel(1.f));
+}
+
+static FString AbilityInstancingPolicyToString(EGameplayAbilityInstancingPolicy::Type Policy)
+{
+#pragma warning(push)
+#pragma warning(disable: 4996)
+	switch (Policy)
+	{
+	case EGameplayAbilityInstancingPolicy::NonInstanced:			return TEXT("NonInstanced");
+	case EGameplayAbilityInstancingPolicy::InstancedPerActor:		return TEXT("InstancedPerActor");
+	case EGameplayAbilityInstancingPolicy::InstancedPerExecution: return TEXT("InstancedPerExecution");
+	default:													 return TEXT("Unknown");
+	}
+#pragma warning(pop)
+}
+
+static FString AbilityReplicationPolicyToString(EGameplayAbilityReplicationPolicy::Type Policy)
+{
+	switch (Policy)
+	{
+	case EGameplayAbilityReplicationPolicy::ReplicateNo:  return TEXT("ReplicateNo");
+	case EGameplayAbilityReplicationPolicy::ReplicateYes: return TEXT("ReplicateYes");
+	default:											 return TEXT("Unknown");
+	}
+}
+
+static FString AbilityNetExecutionPolicyToString(EGameplayAbilityNetExecutionPolicy::Type Policy)
+{
+	switch (Policy)
+	{
+	case EGameplayAbilityNetExecutionPolicy::LocalPredicted:  return TEXT("LocalPredicted");
+	case EGameplayAbilityNetExecutionPolicy::LocalOnly:	   return TEXT("LocalOnly");
+	case EGameplayAbilityNetExecutionPolicy::ServerInitiated: return TEXT("ServerInitiated");
+	case EGameplayAbilityNetExecutionPolicy::ServerOnly:	   return TEXT("ServerOnly");
+	default:												   return TEXT("Unknown");
+	}
+}
+
+static FString AbilityNetSecurityPolicyToString(EGameplayAbilityNetSecurityPolicy::Type Policy)
+{
+	switch (Policy)
+	{
+	case EGameplayAbilityNetSecurityPolicy::ClientOrServer:		   return TEXT("ClientOrServer");
+	case EGameplayAbilityNetSecurityPolicy::ServerOnlyExecution:   return TEXT("ServerOnlyExecution");
+	case EGameplayAbilityNetSecurityPolicy::ServerOnlyTermination: return TEXT("ServerOnlyTermination");
+	case EGameplayAbilityNetSecurityPolicy::ServerOnly:			   return TEXT("ServerOnly");
+	default:													   return TEXT("Unknown");
+	}
+}
+
+static FString AbilityTriggerSourceToString(EGameplayAbilityTriggerSource::Type Source)
+{
+	switch (Source)
+	{
+	case EGameplayAbilityTriggerSource::GameplayEvent: return TEXT("GameplayEvent");
+	case EGameplayAbilityTriggerSource::OwnedTagAdded: return TEXT("OwnedTagAdded");
+	case EGameplayAbilityTriggerSource::OwnedTagPresent: return TEXT("OwnedTagPresent");
+	default: return TEXT("Unknown");
 	}
 }
 
@@ -716,6 +980,48 @@ static FString StackingTypeToString(EGameplayEffectStackingType Type)
 	}
 }
 
+static FString StackingDurationPolicyToString(EGameplayEffectStackingDurationPolicy Policy)
+{
+	switch (Policy)
+	{
+	case EGameplayEffectStackingDurationPolicy::RefreshOnSuccessfulApplication: return TEXT("RefreshOnSuccessfulApplication");
+	case EGameplayEffectStackingDurationPolicy::NeverRefresh: return TEXT("NeverRefresh");
+	default: return TEXT("Unknown");
+	}
+}
+
+static FString StackingPeriodPolicyToString(EGameplayEffectStackingPeriodPolicy Policy)
+{
+	switch (Policy)
+	{
+	case EGameplayEffectStackingPeriodPolicy::ResetOnSuccessfulApplication: return TEXT("ResetOnSuccessfulApplication");
+	case EGameplayEffectStackingPeriodPolicy::NeverReset: return TEXT("NeverReset");
+	default: return TEXT("Unknown");
+	}
+}
+
+static FString StackingExpirationPolicyToString(EGameplayEffectStackingExpirationPolicy Policy)
+{
+	switch (Policy)
+	{
+	case EGameplayEffectStackingExpirationPolicy::ClearEntireStack: return TEXT("ClearEntireStack");
+	case EGameplayEffectStackingExpirationPolicy::RemoveSingleStackAndRefreshDuration: return TEXT("RemoveSingleStackAndRefreshDuration");
+	case EGameplayEffectStackingExpirationPolicy::RefreshDuration: return TEXT("RefreshDuration");
+	default: return TEXT("Unknown");
+	}
+}
+
+static FString PeriodicInhibitionPolicyToString(EGameplayEffectPeriodInhibitionRemovedPolicy Policy)
+{
+	switch (Policy)
+	{
+	case EGameplayEffectPeriodInhibitionRemovedPolicy::NeverReset: return TEXT("NeverReset");
+	case EGameplayEffectPeriodInhibitionRemovedPolicy::ResetPeriod: return TEXT("ResetPeriod");
+	case EGameplayEffectPeriodInhibitionRemovedPolicy::ExecuteAndResetPeriod: return TEXT("ExecuteAndResetPeriod");
+	default: return TEXT("Unknown");
+	}
+}
+
 static FString TagContainerToString(const FGameplayTagContainer& Tags)
 {
 	if (Tags.Num() == 0)
@@ -731,7 +1037,114 @@ static FString TagContainerToString(const FGameplayTagContainer& Tags)
 	return FString::Join(TagStrings, TEXT(", "));
 }
 
-static void ExtractGameplayEffectConfig(UObject* CDO, TArray<TPair<FString, FString>>& Out)
+static FString TagQueryToString(const FGameplayTagQuery& Query)
+{
+	if (Query.IsEmpty())
+	{
+		return FString();
+	}
+
+	const FString Description = Query.GetDescription();
+	return Description.IsEmpty() ? TEXT("(TagQuery)") : Description;
+}
+
+static FString TagRequirementsToString(const FGameplayTagRequirements& Requirements)
+{
+	if (Requirements.IsEmpty())
+	{
+		return FString();
+	}
+
+	TArray<FString> Parts;
+
+	const FString RequireTags = TagContainerToString(Requirements.RequireTags);
+	if (!RequireTags.IsEmpty())
+	{
+		Parts.Add(FString::Printf(TEXT("Require: %s"), *RequireTags));
+	}
+
+	const FString IgnoreTags = TagContainerToString(Requirements.IgnoreTags);
+	if (!IgnoreTags.IsEmpty())
+	{
+		Parts.Add(FString::Printf(TEXT("Ignore: %s"), *IgnoreTags));
+	}
+
+	const FString Query = TagQueryToString(Requirements.TagQuery);
+	if (!Query.IsEmpty())
+	{
+		Parts.Add(FString::Printf(TEXT("Query: %s"), *Query));
+	}
+
+	return FString::Join(Parts, TEXT("; "));
+}
+
+static FString GameplayEffectQueryToString(const FGameplayEffectQuery& Query)
+{
+	if (Query.IsEmpty())
+	{
+		return FString();
+	}
+
+	TArray<FString> Parts;
+
+	const FString OwningQuery = TagQueryToString(Query.OwningTagQuery);
+	if (!OwningQuery.IsEmpty())
+	{
+		Parts.Add(FString::Printf(TEXT("OwningTags: %s"), *OwningQuery));
+	}
+
+	const FString EffectQuery = TagQueryToString(Query.EffectTagQuery);
+	if (!EffectQuery.IsEmpty())
+	{
+		Parts.Add(FString::Printf(TEXT("EffectTags: %s"), *EffectQuery));
+	}
+
+	const FString SourceQuery = TagQueryToString(Query.SourceTagQuery);
+	if (!SourceQuery.IsEmpty())
+	{
+		Parts.Add(FString::Printf(TEXT("SourceSpecTags: %s"), *SourceQuery));
+	}
+
+	const FString SourceAggregateQuery = TagQueryToString(Query.SourceAggregateTagQuery);
+	if (!SourceAggregateQuery.IsEmpty())
+	{
+		Parts.Add(FString::Printf(TEXT("SourceTags: %s"), *SourceAggregateQuery));
+	}
+
+	if (Query.ModifyingAttribute.IsValid())
+	{
+		Parts.Add(FString::Printf(TEXT("Modifies: %s"), *Query.ModifyingAttribute.GetName()));
+	}
+
+	if (Query.EffectSource)
+	{
+		Parts.Add(FString::Printf(TEXT("EffectSource: %s"), *GetNameSafe(Query.EffectSource)));
+	}
+
+	const FString EffectDefinition = ExportClassName(Query.EffectDefinition);
+	if (!EffectDefinition.IsEmpty())
+	{
+		Parts.Add(FString::Printf(TEXT("EffectDefinition: %s"), *EffectDefinition));
+	}
+
+	return FString::Join(Parts, TEXT("; "));
+}
+
+static void ExtractGameplayEffectConfig(UObject* CDO, UObject* ParentCDO, TArray<TPair<FString, FString>>& Out)
+{
+	TArray<TPair<FString, FString>> CurrentConfig;
+	ExtractGameplayEffectConfigRaw(CDO, CurrentConfig);
+
+	TArray<TPair<FString, FString>> ParentConfig;
+	if (ParentCDO && ParentCDO->IsA<UGameplayEffect>())
+	{
+		ExtractGameplayEffectConfigRaw(ParentCDO, ParentConfig);
+	}
+
+	AppendConfigDiff(CurrentConfig, ParentConfig, Out);
+}
+
+static void ExtractGameplayEffectConfigRaw(UObject* CDO, TArray<TPair<FString, FString>>& Out)
 {
 	UGameplayEffect* GE = Cast<UGameplayEffect>(CDO);
 	if (!GE)
@@ -744,16 +1157,23 @@ static void ExtractGameplayEffectConfig(UObject* CDO, TArray<TPair<FString, FStr
 
 	if (GE->DurationPolicy != EGameplayEffectDurationType::Instant)
 	{
+		Out.Emplace(TEXT("DurationMagnitude"), MagnitudeToString(GE->DurationMagnitude));
+
 		// Period
 		float PeriodVal = GE->Period.GetValueAtLevel(1.f);
 		if (PeriodVal > 0.f)
 		{
-			FString PeriodStr = FString::Printf(TEXT("%g"), PeriodVal);
+			FString PeriodStr = ScalableFloatToString(GE->Period);
 			if (GE->bExecutePeriodicEffectOnApplication)
 			{
 				PeriodStr += TEXT(" (execute on application)");
 			}
 			Out.Emplace(TEXT("Period"), PeriodStr);
+		}
+
+		if (PeriodVal > 0.f || GE->PeriodicInhibitionPolicy != EGameplayEffectPeriodInhibitionRemovedPolicy::NeverReset)
+		{
+			Out.Emplace(TEXT("PeriodicInhibitionPolicy"), PeriodicInhibitionPolicyToString(GE->PeriodicInhibitionPolicy));
 		}
 	}
 
@@ -764,9 +1184,19 @@ static void ExtractGameplayEffectConfig(UObject* CDO, TArray<TPair<FString, FStr
 		FString AttrName = Mod.Attribute.GetName();
 		FString OpStr = ModOpToString(Mod.ModifierOp);
 		FString MagStr = MagnitudeToString(Mod.ModifierMagnitude);
+		const FString SourceReq = TagRequirementsToString(Mod.SourceTags);
+		const FString TargetReq = TagRequirementsToString(Mod.TargetTags);
 
 		FString Key = FString::Printf(TEXT("Modifiers[%d]"), i);
 		FString Value = FString::Printf(TEXT("%s %s %s"), *AttrName, *OpStr, *MagStr);
+		if (!SourceReq.IsEmpty())
+		{
+			Value += FString::Printf(TEXT(" | SourceTags: %s"), *SourceReq);
+		}
+		if (!TargetReq.IsEmpty())
+		{
+			Value += FString::Printf(TEXT(" | TargetTags: %s"), *TargetReq);
+		}
 		Out.Emplace(MoveTemp(Key), MoveTemp(Value));
 	}
 
@@ -775,10 +1205,20 @@ static void ExtractGameplayEffectConfig(UObject* CDO, TArray<TPair<FString, FStr
 	{
 		const FGameplayEffectExecutionDefinition& Exec = GE->Executions[i];
 		FString ClassName = Exec.CalculationClass
-			? Exec.CalculationClass->GetName() : TEXT("None");
+			? StripGeneratedClassSuffix(Exec.CalculationClass->GetName()) : TEXT("None");
+		const FString PassedInTags = TagContainerToString(Exec.PassedInTags);
+		FString Value = ClassName;
+		if (!PassedInTags.IsEmpty())
+		{
+			Value += FString::Printf(TEXT(" | PassedInTags: %s"), *PassedInTags);
+		}
+		if (Exec.ConditionalGameplayEffects.Num() > 0)
+		{
+			Value += FString::Printf(TEXT(" | ConditionalEffects: %d"), Exec.ConditionalGameplayEffects.Num());
+		}
 		Out.Emplace(
 			FString::Printf(TEXT("Executions[%d]"), i),
-			ClassName);
+			Value);
 	}
 
 	// Stacking
@@ -790,6 +1230,13 @@ static void ExtractGameplayEffectConfig(UObject* CDO, TArray<TPair<FString, FStr
 			StackStr += FString::Printf(TEXT(" (limit: %d)"), GE->StackLimitCount);
 		}
 		Out.Emplace(TEXT("Stacking"), StackStr);
+		Out.Emplace(TEXT("StackDurationRefreshPolicy"), StackingDurationPolicyToString(GE->StackDurationRefreshPolicy));
+		Out.Emplace(TEXT("StackPeriodResetPolicy"), StackingPeriodPolicyToString(GE->StackPeriodResetPolicy));
+		Out.Emplace(TEXT("StackExpirationPolicy"), StackingExpirationPolicyToString(GE->StackExpirationPolicy));
+		if (GE->bFactorInStackCount)
+		{
+			Out.Emplace(TEXT("FactorInStackCount"), TEXT("True"));
+		}
 	}
 
 	// Tags — extract from GE Components (UE 5.3+) and legacy containers
@@ -803,11 +1250,139 @@ static void ExtractGameplayEffectConfig(UObject* CDO, TArray<TPair<FString, FStr
 	};
 
 	AddTags(TEXT("AssetTags"), GE->GetAssetTags());
+	AddTags(TEXT("GrantedToActor"), GE->GetGrantedTags());
+	AddTags(TEXT("BlockedAbilities"), GE->GetBlockedAbilityTags());
 
-	// Legacy tag containers (still populated in many projects)
-	if (GE->InheritableOwnedTagsContainer.CombinedTags.Num() > 0)
+	if (const UTargetTagRequirementsGameplayEffectComponent* RequirementsComponent =
+		GE->FindComponent<UTargetTagRequirementsGameplayEffectComponent>())
 	{
-		AddTags(TEXT("GrantedToActor"), GE->InheritableOwnedTagsContainer.CombinedTags);
+		const FString ApplicationReq = TagRequirementsToString(RequirementsComponent->ApplicationTagRequirements);
+		if (!ApplicationReq.IsEmpty())
+		{
+			Out.Emplace(TEXT("Requirements.Application"), ApplicationReq);
+		}
+
+		const FString OngoingReq = TagRequirementsToString(RequirementsComponent->OngoingTagRequirements);
+		if (!OngoingReq.IsEmpty())
+		{
+			Out.Emplace(TEXT("Requirements.Ongoing"), OngoingReq);
+		}
+
+		const FString RemovalReq = TagRequirementsToString(RequirementsComponent->RemovalTagRequirements);
+		if (!RemovalReq.IsEmpty())
+		{
+			Out.Emplace(TEXT("Requirements.Removal"), RemovalReq);
+		}
+	}
+	else
+	{
+#pragma warning(push)
+#pragma warning(disable: 4996)
+		const FString ApplicationReq = TagRequirementsToString(GE->ApplicationTagRequirements);
+		if (!ApplicationReq.IsEmpty())
+		{
+			Out.Emplace(TEXT("Requirements.Application"), ApplicationReq);
+		}
+
+		const FString OngoingReq = TagRequirementsToString(GE->OngoingTagRequirements);
+		if (!OngoingReq.IsEmpty())
+		{
+			Out.Emplace(TEXT("Requirements.Ongoing"), OngoingReq);
+		}
+
+		const FString RemovalReq = TagRequirementsToString(GE->RemovalTagRequirements);
+		if (!RemovalReq.IsEmpty())
+		{
+			Out.Emplace(TEXT("Requirements.Removal"), RemovalReq);
+		}
+#pragma warning(pop)
+	}
+
+	if (const UAbilitiesGameplayEffectComponent* AbilitiesComponent =
+		GE->FindComponent<UAbilitiesGameplayEffectComponent>())
+	{
+		if (const TArray<FGameplayAbilitySpecConfig>* GrantConfigs =
+			GetObjectArrayFieldPtr<FGameplayAbilitySpecConfig>(AbilitiesComponent, TEXT("GrantAbilityConfigs")))
+		{
+			for (int32 i = 0; i < GrantConfigs->Num(); ++i)
+			{
+				const FGameplayAbilitySpecConfig& Config = (*GrantConfigs)[i];
+				FString Value = ExportClassName(Config.Ability);
+				Value += FString::Printf(TEXT(" | Level: %g"), Config.LevelScalableFloat.GetValueAtLevel(1.f));
+				if (Config.InputID != INDEX_NONE)
+				{
+					Value += FString::Printf(TEXT(" | InputID: %d"), Config.InputID);
+				}
+				Value += FString::Printf(TEXT(" | RemovalPolicy: %s"),
+					*StaticEnum<EGameplayEffectGrantedAbilityRemovePolicy>()->GetNameStringByValue(static_cast<int64>(Config.RemovalPolicy)));
+
+				Out.Emplace(FString::Printf(TEXT("GrantedAbilities[%d]"), i), Value);
+			}
+		}
+	}
+	else if (const TArray<FGameplayAbilitySpecDef>* GrantedAbilities =
+		GetObjectArrayFieldPtr<FGameplayAbilitySpecDef>(GE, TEXT("GrantedAbilities")))
+	{
+		for (int32 i = 0; i < GrantedAbilities->Num(); ++i)
+		{
+			const FGameplayAbilitySpecDef& GrantedAbility = (*GrantedAbilities)[i];
+			Out.Emplace(
+				FString::Printf(TEXT("GrantedAbilities[%d]"), i),
+				StripGeneratedClassSuffix(GetNameSafe(GrantedAbility.Ability)));
+		}
+	}
+
+	if (const UImmunityGameplayEffectComponent* ImmunityComponent =
+		GE->FindComponent<UImmunityGameplayEffectComponent>())
+	{
+		for (int32 i = 0; i < ImmunityComponent->ImmunityQueries.Num(); ++i)
+		{
+			const FString Query = GameplayEffectQueryToString(ImmunityComponent->ImmunityQueries[i]);
+			if (!Query.IsEmpty())
+			{
+				Out.Emplace(FString::Printf(TEXT("ImmunityQueries[%d]"), i), Query);
+			}
+		}
+	}
+	else
+	{
+#pragma warning(push)
+#pragma warning(disable: 4996)
+		const FString ImmunityReq = TagRequirementsToString(GE->GrantedApplicationImmunityTags);
+		if (!ImmunityReq.IsEmpty())
+		{
+			Out.Emplace(TEXT("GrantedApplicationImmunityTags"), ImmunityReq);
+		}
+		const FString ImmunityQuery = GameplayEffectQueryToString(GE->GrantedApplicationImmunityQuery);
+		if (!ImmunityQuery.IsEmpty())
+		{
+			Out.Emplace(TEXT("GrantedApplicationImmunityQuery"), ImmunityQuery);
+		}
+#pragma warning(pop)
+	}
+
+	if (const URemoveOtherGameplayEffectComponent* RemoveOtherComponent =
+		GE->FindComponent<URemoveOtherGameplayEffectComponent>())
+	{
+		for (int32 i = 0; i < RemoveOtherComponent->RemoveGameplayEffectQueries.Num(); ++i)
+		{
+			const FString Query = GameplayEffectQueryToString(RemoveOtherComponent->RemoveGameplayEffectQueries[i]);
+			if (!Query.IsEmpty())
+			{
+				Out.Emplace(FString::Printf(TEXT("RemoveGameplayEffectQueries[%d]"), i), Query);
+			}
+		}
+	}
+	else
+	{
+#pragma warning(push)
+#pragma warning(disable: 4996)
+		const FString RemoveQuery = GameplayEffectQueryToString(GE->RemoveGameplayEffectQuery);
+		if (!RemoveQuery.IsEmpty())
+		{
+			Out.Emplace(TEXT("RemoveGameplayEffectQuery"), RemoveQuery);
+		}
+#pragma warning(pop)
 	}
 
 	// GameplayCues
@@ -823,6 +1398,106 @@ static void ExtractGameplayEffectConfig(UObject* CDO, TArray<TPair<FString, FStr
 	}
 }
 
+static void ExtractGameplayAbilityConfig(UObject* CDO, UObject* ParentCDO, TArray<TPair<FString, FString>>& Out)
+{
+	TArray<TPair<FString, FString>> CurrentConfig;
+	ExtractGameplayAbilityConfigRaw(CDO, CurrentConfig);
+
+	TArray<TPair<FString, FString>> ParentConfig;
+	if (ParentCDO && ParentCDO->IsA<UGameplayAbility>())
+	{
+		ExtractGameplayAbilityConfigRaw(ParentCDO, ParentConfig);
+	}
+
+	AppendConfigDiff(CurrentConfig, ParentConfig, Out);
+}
+
+static void ExtractGameplayAbilityConfigRaw(UObject* CDO, TArray<TPair<FString, FString>>& Out)
+{
+	UGameplayAbility* Ability = Cast<UGameplayAbility>(CDO);
+	if (!Ability)
+	{
+		return;
+	}
+
+	const FString AbilityTags = TagContainerToString(Ability->GetAssetTags());
+	if (!AbilityTags.IsEmpty())
+	{
+		Out.Emplace(TEXT("AbilityTags"), AbilityTags);
+	}
+
+	Out.Emplace(TEXT("ReplicationPolicy"),
+		AbilityReplicationPolicyToString(Ability->GetReplicationPolicy()));
+	Out.Emplace(TEXT("InstancingPolicy"),
+		AbilityInstancingPolicyToString(Ability->GetInstancingPolicy()));
+	Out.Emplace(TEXT("NetExecutionPolicy"),
+		AbilityNetExecutionPolicyToString(Ability->GetNetExecutionPolicy()));
+	Out.Emplace(TEXT("NetSecurityPolicy"),
+		AbilityNetSecurityPolicyToString(Ability->GetNetSecurityPolicy()));
+
+	if (GetObjectBoolField(Ability, TEXT("bServerRespectsRemoteAbilityCancellation")))
+	{
+		Out.Emplace(TEXT("ServerRespectsRemoteAbilityCancellation"), TEXT("True"));
+	}
+	if (GetObjectBoolField(Ability, TEXT("bRetriggerInstancedAbility")))
+	{
+		Out.Emplace(TEXT("RetriggerInstancedAbility"), TEXT("True"));
+	}
+	if (GetObjectBoolField(Ability, TEXT("bReplicateInputDirectly")))
+	{
+		Out.Emplace(TEXT("ReplicateInputDirectly"), TEXT("True"));
+	}
+
+	const FString CostClass = GetObjectClassFieldName(Ability, TEXT("CostGameplayEffectClass"));
+	if (!CostClass.IsEmpty())
+	{
+		Out.Emplace(TEXT("CostGameplayEffectClass"), CostClass);
+	}
+
+	const FString CooldownClass = GetObjectClassFieldName(Ability, TEXT("CooldownGameplayEffectClass"));
+	if (!CooldownClass.IsEmpty())
+	{
+		Out.Emplace(TEXT("CooldownGameplayEffectClass"), CooldownClass);
+	}
+
+	auto AddTags = [&](const TCHAR* Label, const TCHAR* FieldName)
+	{
+		if (const FGameplayTagContainer* Tags = GetObjectStructFieldPtr<FGameplayTagContainer>(Ability, FieldName))
+		{
+			const FString TagString = TagContainerToString(*Tags);
+			if (!TagString.IsEmpty())
+			{
+				Out.Emplace(Label, TagString);
+			}
+		}
+	};
+
+	AddTags(TEXT("CancelAbilitiesWithTag"), TEXT("CancelAbilitiesWithTag"));
+	AddTags(TEXT("BlockAbilitiesWithTag"), TEXT("BlockAbilitiesWithTag"));
+	AddTags(TEXT("ActivationOwnedTags"), TEXT("ActivationOwnedTags"));
+	AddTags(TEXT("ActivationRequiredTags"), TEXT("ActivationRequiredTags"));
+	AddTags(TEXT("ActivationBlockedTags"), TEXT("ActivationBlockedTags"));
+	AddTags(TEXT("SourceRequiredTags"), TEXT("SourceRequiredTags"));
+	AddTags(TEXT("SourceBlockedTags"), TEXT("SourceBlockedTags"));
+	AddTags(TEXT("TargetRequiredTags"), TEXT("TargetRequiredTags"));
+	AddTags(TEXT("TargetBlockedTags"), TEXT("TargetBlockedTags"));
+
+	if (const TArray<FAbilityTriggerData>* AbilityTriggers =
+		GetObjectArrayFieldPtr<FAbilityTriggerData>(Ability, TEXT("AbilityTriggers")))
+	{
+		for (int32 i = 0; i < AbilityTriggers->Num(); ++i)
+		{
+			const FAbilityTriggerData& Trigger = (*AbilityTriggers)[i];
+			FString Value = AbilityTriggerSourceToString(Trigger.TriggerSource);
+			if (Trigger.TriggerTag.IsValid())
+			{
+				Value = FString::Printf(TEXT("%s | Tag: %s"), *Value, *Trigger.TriggerTag.ToString());
+			}
+			Out.Emplace(FString::Printf(TEXT("AbilityTriggers[%d]"), i), Value);
+		}
+	}
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 // Config Extractor Registry
 // ────────────────────────────────────────────────────────────────────────────
@@ -830,7 +1505,8 @@ static void ExtractGameplayEffectConfig(UObject* CDO, TArray<TPair<FString, FStr
 static const TArray<FConfigExtractorEntry>& GetConfigExtractorRegistry()
 {
 	static TArray<FConfigExtractorEntry> Registry = {
-		{ UGameplayEffect::StaticClass(), &ExtractGameplayEffectConfig },
+		{ UGameplayEffect::StaticClass(), TEXT("GameplayEffect"), &ExtractGameplayEffectConfig },
+		{ UGameplayAbility::StaticClass(), TEXT("GameplayAbility"), &ExtractGameplayAbilityConfig },
 	};
 	return Registry;
 }

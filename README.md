@@ -1,6 +1,6 @@
 # BlueprintExporter 插件参考文档
 
-> 适用版本：v10（语义连接 + CDO 配置导出 + GAS 专用格式化）
+> 适用版本：v11（GAS 特化导出 + 父类差异配置 + 检索式索引）
 > 引擎：Unreal Engine 5.x（Editor-only Plugin）
 > 作者：Capybara、Claude
 
@@ -35,7 +35,7 @@ BlueprintExporter 是一个 UE5 Editor-only 插件，将蓝图的节点图（Eve
 |自动导出（保存时）|Ctrl+S 时自动触发，受 `bAutoExportOnSave` 开关控制|
 |关闭编辑器时全量导出|关闭编辑器前自动触发，受 `bExportOnEditorClose` 开关控制|
 |选中节点导出|蓝图编辑器内右键节点 → Copy / Export Selected Nodes|
-|CDO 配置导出|GameplayEffect 等数据蓝图自动提取 CDO 属性配置|
+|CDO 配置导出|GameplayEffect / GameplayAbility 等数据蓝图自动提取专用配置|
 
 ---
 
@@ -92,7 +92,7 @@ Blueprint Exporter
 
 * 每次 Ctrl+S 保存蓝图时，插件检测到 `PackageSavedWithContextEvent` 事件
 * 若蓝图通过 `ShouldExport()` 过滤，自动导出到缓存目录
-* 保存完成后更新 `_index.txt` 和 `README.md`
+* 保存完成后更新 `_index.txt` 和 `AGENTS.md`
 
 ---
 
@@ -140,8 +140,8 @@ Blueprint Exporter
 
 ```
 {ProjectDir}/BlueprintExports/
-├── README.md                       ← 所有蓝图的 Markdown 汇总表
-├── _index.txt                      ← 纯文本索引（蓝图名/父类/图表数/变量数）
+├── AGENTS.md                       ← AI 引导文件（自动生成，强调先 grep/rg 索引）
+├── _index.txt                      ← 单行检索索引（蓝图名/父类/图表数/变量数）
 │
 ├── AC_EnemyAI/
 │   ├── _summary.txt                ← 变量 + CDO 配置 + 执行流概览（先读这个）
@@ -153,6 +153,10 @@ Blueprint Exporter
 │
 └── ...
 ```
+
+**AGENTS.md**：每次导出时自动生成（内容内嵌于插件源码 `GAgentsMdContent`），强调先用 `rg/grep` 检索 `_index.txt`，不要整文件通读。使用 `WriteFileIfChanged()` 保证内容不变时不更新文件时间戳。
+
+**README.md**：`BlueprintExports/README.md` 已移除，不再导出，避免在大项目里制造高噪音、低信息密度的重复上下文。
 
 **文件名规则**：图表名经 `SanitizeFileName()` 处理——只保留字母、数字、`_`、`-`，其余字符替换为 `_`。
 
@@ -184,18 +188,29 @@ Macro: Switch Has Authority:
 KismetSystemLibrary::K2_SetTimerDelegate
 ```
 
-**GameplayEffect 蓝图示例**（CDO 配置）：
+**GameplayEffect 蓝图示例**（CDO 配置，父类差异导出）：
 
 ```
-=== Blueprint: GE_HealthManaStaminaRegenVolume (Parent: GameplayEffect) ===
+=== Blueprint: GE_MeteorStun (Parent: GE_StandardStun) ===
 
 === Configuration ===
-  Duration: Infinite
-  Tags.AssetTags: Effect.RemoveOnDeath
-  Modifiers:
-    [0] HealthRegenRate += 20 (ScalableFloat)
-    [1] ManaRegenRate += 20 (ScalableFloat)
-    [2] StaminaRegenRate += 20 (ScalableFloat)
+  ParentConfig: GE_StandardStun (inspect parent _summary for inherited values)
+  DurationMagnitude: 5 (ScalableFloat)
+```
+
+**GameplayAbility 蓝图示例**（专用配置，默认值不重复导出）：
+
+```
+=== Blueprint: GA_Sprint_BP (Parent: GDGameplayAbility) ===
+
+=== Configuration ===
+  AbilityTags: Ability.Sprint
+  CostGameplayEffectClass: GE_SprintCost
+  CancelAbilitiesWithTag: Ability.AimDownSights
+  ActivationOwnedTags: Ability.Sprint
+  ActivationBlockedTags: State.Dead, State.Debuff.Stun, Ability.Skill
+  AbilityInputID: Sprint
+  AbilityID: Sprint
 ```
 
 ---
@@ -223,13 +238,15 @@ KismetSystemLibrary::K2_SetTimerDelegate
   {SourceNode} [{PinLabel}] --> {TargetNode}
 ```
 
-**v9/v10 变化**：
+**v9/v10/v11 变化**：
 - Pin 连接目标使用语义节点名（如 `-> AbilitySystemComponent::MakeEffectContext.Target`）
 - 未连接且无设置值的输入 Pin 不输出（减少噪音）
 - 运算符节点显示具体操作名（如 `KismetMathLibrary::BooleanAND`）
 - 未实现的 Override 事件和空 FunctionEntry 自动过滤
 - Compact 执行流树整合进 `_summary.txt`（不再单独生成 `_compact.txt`）
-- 新增 `=== Configuration ===` 区，导出 CDO 属性配置（GE 专用格式 + 通用 fallback）
+- 新增 `=== Configuration ===` 区，导出 CDO 属性配置（GE / GA 专用格式 + 通用 fallback）
+- `GameplayEffect` / `GameplayAbility` 使用父类差异导出：和父类默认值相同的配置不重复输出
+- `_index.txt` 改为单行检索格式，面向 `rg/grep` 使用
 
 ### 5.2 变量格式
 
@@ -540,6 +557,8 @@ struct FExportedBlueprint
 {
     FString BlueprintName;
     FString ParentClass;    // 去掉 _C 后缀
+    FString ConfigType;     // "Generic" | "GameplayEffect" | "GameplayAbility"
+    FString ParentConfigSource; // 父蓝图配置来源（若存在）
     TArray<FExportedVariable> Variables;
     TArray<FExportedGraph> Graphs;
     TArray<TPair<FString, FString>> CDOProperties;  // (SemanticKey, Value)
@@ -594,15 +613,14 @@ CDO 导出的枚举字符串（格式 `EAI_State::NewEnumerator0`）在读取 CD
 
 ## 蓝图导出分析规范
 
-分析 `Saved/BlueprintExports/` 中的蓝图导出时，遵循以下规则：
+分析 `BlueprintExports/` 中的蓝图导出时，遵循以下规则：
 
 ### 阅读顺序
 
-1. 先读 `_index.txt` 了解有哪些蓝图
-2. 需要某个蓝图的细节时，先读其 `_summary.txt`（变量和 Graph 列表）
-3. 读取 `_compact.txt` 了解伪代码级别的逻辑概述（v8 新增）
-4. 只在需要修改具体节点时才读单个 Graph 文件
-5. 不要一次性读取整个蓝图的完整导出
+1. 不要整文件通读 `_index.txt`；先用 `rg/grep` 按名称、前缀或父类检索
+2. 需要某个蓝图的细节时，先读其 `_summary.txt`
+3. 只在需要修改具体节点时才读单个 Graph 文件
+4. 不要一次性读取整个蓝图的完整导出
 
 ### 分析折叠节点（COLLAPSED）时的注意事项
 
@@ -634,7 +652,15 @@ CDO 导出的枚举字符串（格式 `EAI_State::NewEnumerator0`）在读取 CD
 
 ## 附录：版本更新摘要
 
-### v10（当前版本）
+### v11（当前版本）
+
+- **GAS 特化导出**：`GameplayEffect` / `GameplayAbility` 拥有专用提取器与专用 formatter
+- **父类差异导出**：专用配置也会与 `ParentCDO` 比较，和父类默认值一致的字段不导出
+- **继承提示**：子类 GE / GA 在 `_summary.txt` 中输出 `ParentConfig`
+- **索引降噪**：不再导出 `BlueprintExports/README.md`
+- **检索式入口**：`_index.txt` 改为单行记录，`AGENTS.md` 明确要求使用 `rg/grep`
+
+### v10
 
 - **CDO 配置导出**：GameplayEffect 蓝图自动提取 Duration、Period、Modifiers、Stacking、Tags 等配置
 - **可扩展注册表**：类型专用提取/格式化通过注册表分发，新增 GAS 类型只需写两个函数 + 各加一行

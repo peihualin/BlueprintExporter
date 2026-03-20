@@ -497,6 +497,7 @@ void FBlueprintExporterModule::OnPackageSaved(const FString& /*PackageFilename*/
 		{
 			ExportBlueprintToCache(BP);
 			GenerateIndexFile();
+			GenerateAgentsMd();
 		}
 		return true;
 	});
@@ -640,6 +641,7 @@ void FBlueprintExporterModule::ExportAllBlueprints()
 
 	CleanupStaleExports(CurrentBPNames);
 	GenerateIndexFile();
+	GenerateAgentsMd();
 
 	UE_LOG(LogBlueprintExporter, Log,
 		TEXT("ExportAll complete: %d exported, %d skipped (unchanged), %d filtered out, %d total assets"),
@@ -654,19 +656,11 @@ void FBlueprintExporterModule::GenerateIndexFile()
 	IFileManager::Get().FindFiles(SubDirs, *(BaseDir / TEXT("*")), /*bFiles=*/false, /*bDirectories=*/true);
 
 	TArray<FString> IndexLines;
-	TArray<FString> ReadmeLines;
 
 	const FString Timestamp = FDateTime::Now().ToString();
 
 	IndexLines.Add(FString::Printf(TEXT("Blueprint Export Index — %s"), *Timestamp));
 	IndexLines.Add(TEXT(""));
-
-	ReadmeLines.Add(TEXT("# Blueprint Exports"));
-	ReadmeLines.Add(TEXT(""));
-	ReadmeLines.Add(FString::Printf(TEXT("Generated: %s"), *Timestamp));
-	ReadmeLines.Add(TEXT(""));
-	ReadmeLines.Add(TEXT("| Blueprint | Parent | Graphs | Variables |"));
-	ReadmeLines.Add(TEXT("|-----------|--------|--------|-----------|"));
 
 	int32 BPCount = 0;
 
@@ -752,19 +746,9 @@ void FBlueprintExporterModule::GenerateIndexFile()
 			}
 		}
 
-		// Index entry
-		IndexLines.Add(FString::Printf(TEXT("%s"), *SubDir));
-		if (!ParentName.IsEmpty())
-		{
-			IndexLines.Add(FString::Printf(TEXT("  Parent: %s"), *ParentName));
-		}
-		IndexLines.Add(FString::Printf(TEXT("  Graphs: %d"), GraphCount));
-		IndexLines.Add(FString::Printf(TEXT("  Variables: %d"), VarCount));
-		IndexLines.Add(TEXT(""));
-
-		// README row
-		ReadmeLines.Add(FString::Printf(TEXT("| %s | %s | %d | %d |"),
-			*BPName, *ParentName, GraphCount, VarCount));
+		const FString ParentField = ParentName.IsEmpty() ? TEXT("-") : ParentName;
+		IndexLines.Add(FString::Printf(TEXT("%s | Parent=%s | Graphs=%d | Variables=%d"),
+			*BPName, *ParentField, GraphCount, VarCount));
 	}
 
 	// Insert total count after first line
@@ -775,10 +759,36 @@ void FBlueprintExporterModule::GenerateIndexFile()
 		*FPaths::Combine(BaseDir, TEXT("_index.txt")),
 		FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM);
 
-	FFileHelper::SaveStringToFile(
-		FString::Join(ReadmeLines, TEXT("\n")),
-		*FPaths::Combine(BaseDir, TEXT("README.md")),
-		FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM);
+	IFileManager::Get().Delete(*FPaths::Combine(BaseDir, TEXT("README.md")), /*RequireExists=*/false);
+}
+
+// Embedded content for BlueprintExports/AGENTS.md
+static const TCHAR* GAgentsMdContent = TEXT(
+	"## Blueprint Exports\n"
+	"\n"
+	"Use `_index.txt` as a search index, not as a file to read top-to-bottom.\n"
+	"\n"
+	"1. Use `rg`/`grep` on `_index.txt` to locate blueprints by name, prefix, or parent class.\n"
+	"2. Read `<BlueprintName>/_summary.txt` first.\n"
+	"3. Read `<GraphName>.txt` only when `_summary.txt` is not enough.\n"
+	"\n"
+	"Examples:\n"
+	"- `rg \"^GA_\" BlueprintExports/_index.txt`\n"
+	"- `rg \"Parent=.*GameplayEffect\" BlueprintExports/_index.txt`\n"
+	"- `rg \"Meteor\" BlueprintExports/_index.txt`\n"
+	"\n"
+	"Notes:\n"
+	"- `GA_*`: start with `_summary.txt`; focus on Configuration and activation flow.\n"
+	"- `GE_*`: usually config-heavy; `_summary.txt` is the primary source.\n"
+	"- `GC_*`: read `_summary.txt`, then graph files only if behavior is non-trivial.\n"
+);
+
+void FBlueprintExporterModule::GenerateAgentsMd()
+{
+	const FString BaseDir = FPaths::Combine(FPaths::ProjectDir(), TEXT("BlueprintExports"));
+	const FString AgentsPath = FPaths::Combine(BaseDir, TEXT("AGENTS.md"));
+
+	WriteFileIfChanged(AgentsPath, GAgentsMdContent);
 }
 
 void FBlueprintExporterModule::CleanupStaleExports(const TSet<FString>& CurrentBPNames)

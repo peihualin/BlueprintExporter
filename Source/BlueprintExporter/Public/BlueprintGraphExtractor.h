@@ -8,11 +8,12 @@ class UBlueprint;
 class UEdGraph;
 class UEdGraphNode;
 
-using FConfigExtractFunc = void(*)(UObject* CDO, TArray<TPair<FString, FString>>& OutConfig);
+using FConfigExtractFunc = void(*)(UObject* CDO, UObject* ParentCDO, TArray<TPair<FString, FString>>& OutConfig);
 
 struct FConfigExtractorEntry
 {
 	UClass* ParentClass;
+	const TCHAR* ConfigType;
 	FConfigExtractFunc ExtractFunc;
 };
 

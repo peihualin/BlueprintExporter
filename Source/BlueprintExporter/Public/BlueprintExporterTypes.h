@@ -52,6 +52,8 @@ struct FExportedBlueprint
 {
 	FString BlueprintName;
 	FString ParentClass;
+	FString ConfigType;         // "Generic", "GameplayEffect", "GameplayAbility"
+	FString ParentConfigSource; // Blueprint parent config source, if any
 	TArray<FExportedVariable> Variables;
 	TArray<FExportedGraph> Graphs;
 

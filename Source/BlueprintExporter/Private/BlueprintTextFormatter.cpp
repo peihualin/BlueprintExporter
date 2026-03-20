@@ -859,7 +859,10 @@ FString FBlueprintTextFormatter::FormatSummary(const FExportedBlueprint& Bluepri
 	// CDO Configuration section
 	if (Blueprint.CDOProperties.Num() > 0)
 	{
-		FString ConfigSection = FormatConfiguration(Blueprint.CDOProperties, Blueprint.ParentClass);
+		FString ConfigSection = FormatConfiguration(
+			Blueprint.CDOProperties,
+			Blueprint.ConfigType,
+			Blueprint.ParentConfigSource);
 		if (!ConfigSection.IsEmpty())
 		{
 			Lines.Add(ConfigSection);
@@ -1292,12 +1295,21 @@ FString FBlueprintTextFormatter::FormatCompactChain(
 // CDO Configuration Formatting
 // ────────────────────────────────────────────────────────────────────────────
 
-using FConfigFormatFunc = FString(*)(const TArray<TPair<FString, FString>>&);
+using FConfigFormatFunc = FString(*)(const TArray<TPair<FString, FString>>&, const FString&);
 
-static FString FormatGameplayEffectConfig(const TArray<TPair<FString, FString>>& Config)
+static FString FormatStructuredConfig(
+	const TArray<TPair<FString, FString>>& Config,
+	const FString& ParentConfigSource)
 {
 	TArray<FString> Lines;
 	Lines.Add(TEXT("=== Configuration ==="));
+
+	if (!ParentConfigSource.IsEmpty())
+	{
+		Lines.Add(FString::Printf(
+			TEXT("  ParentConfig: %s (inspect parent _summary for inherited values)"),
+			*ParentConfigSource));
+	}
 
 	TMap<FString, TArray<TPair<int32, FString>>> ArrayGroups;
 	TArray<TPair<FString, FString>> Scalars;
@@ -1336,10 +1348,31 @@ static FString FormatGameplayEffectConfig(const TArray<TPair<FString, FString>>&
 	return FString::Join(Lines, TEXT("\n"));
 }
 
-static FString FormatGenericConfig(const TArray<TPair<FString, FString>>& Config)
+static FString FormatGameplayEffectConfig(
+	const TArray<TPair<FString, FString>>& Config,
+	const FString& ParentConfigSource)
+{
+	return FormatStructuredConfig(Config, ParentConfigSource);
+}
+
+static FString FormatGameplayAbilityConfig(
+	const TArray<TPair<FString, FString>>& Config,
+	const FString& ParentConfigSource)
+{
+	return FormatStructuredConfig(Config, ParentConfigSource);
+}
+
+static FString FormatGenericConfig(
+	const TArray<TPair<FString, FString>>& Config,
+	const FString& ParentConfigSource)
 {
 	TArray<FString> Lines;
 	Lines.Add(TEXT("=== Configuration ==="));
+
+	if (!ParentConfigSource.IsEmpty())
+	{
+		Lines.Add(FString::Printf(TEXT("  ParentConfig = %s"), *ParentConfigSource));
+	}
 
 	for (const auto& Pair : Config)
 	{
@@ -1353,26 +1386,25 @@ static const TMap<FString, FConfigFormatFunc>& GetConfigFormatterRegistry()
 {
 	static TMap<FString, FConfigFormatFunc> Registry = {
 		{ TEXT("GameplayEffect"), &FormatGameplayEffectConfig },
+		{ TEXT("GameplayAbility"), &FormatGameplayAbilityConfig },
 	};
 	return Registry;
 }
 
 FString FBlueprintTextFormatter::FormatConfiguration(
 	const TArray<TPair<FString, FString>>& CDOProperties,
-	const FString& ParentClass)
+	const FString& ConfigType,
+	const FString& ParentConfigSource)
 {
-	if (CDOProperties.Num() == 0)
+	if (CDOProperties.Num() == 0 && ParentConfigSource.IsEmpty())
 	{
 		return FString();
 	}
 
-	for (const auto& Entry : GetConfigFormatterRegistry())
+	if (const FConfigFormatFunc* Formatter = GetConfigFormatterRegistry().Find(ConfigType))
 	{
-		if (ParentClass.Contains(Entry.Key))
-		{
-			return Entry.Value(CDOProperties);
-		}
+		return (*Formatter)(CDOProperties, ParentConfigSource);
 	}
 
-	return FormatGenericConfig(CDOProperties);
+	return FormatGenericConfig(CDOProperties, ParentConfigSource);
 }

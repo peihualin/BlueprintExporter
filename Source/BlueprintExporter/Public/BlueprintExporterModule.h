@@ -25,6 +25,7 @@ private:
 	bool ExportBlueprintToCache(UBlueprint* Blueprint);
 	void ExportAllBlueprints();
 	void GenerateIndexFile();
+	void GenerateAgentsMd();
 	void CleanupStaleExports(const TSet<FString>& CurrentBPNames);
 	bool ShouldExport(UBlueprint* Blueprint, const UBlueprintExporterSettings* Settings) const;
 	static FString SanitizeFileName(const FString& Name);
