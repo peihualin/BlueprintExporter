@@ -92,7 +92,7 @@ Blueprint Exporter
 
 * 每次 Ctrl+S 保存蓝图时，插件检测到 `PackageSavedWithContextEvent` 事件
 * 若蓝图通过 `ShouldExport()` 过滤，自动导出到缓存目录
-* 保存完成后更新 `_index.txt` 和 `AGENTS.md`
+* 保存完成后更新 `AGENTS.md`，并清理旧的 `_index.txt` / `README.md`
 
 ---
 
@@ -140,8 +140,7 @@ Blueprint Exporter
 
 ```
 {ProjectDir}/BlueprintExports/
-├── AGENTS.md                       ← AI 引导文件（自动生成，强调先 grep/rg 索引）
-├── _index.txt                      ← 单行检索索引（蓝图名/父类/图表数/变量数）
+├── AGENTS.md                       ← AI 引导文件（自动生成，说明先读 `_summary.txt`）
 │
 ├── AC_EnemyAI/
 │   ├── _summary.txt                ← 变量 + CDO 配置 + 执行流概览（先读这个）
@@ -154,9 +153,9 @@ Blueprint Exporter
 └── ...
 ```
 
-**AGENTS.md**：每次导出时自动生成（内容内嵌于插件源码 `GAgentsMdContent`），强调先用 `rg/grep` 检索 `_index.txt`，不要整文件通读。使用 `WriteFileIfChanged()` 保证内容不变时不更新文件时间戳。
+**AGENTS.md**：每次导出时自动生成（内容内嵌于插件源码 `GAgentsMdContent`），说明如何阅读 `_summary.txt` / 图表导出。使用 `WriteFileIfChanged()` 保证内容不变时不更新文件时间戳。
 
-**README.md**：`BlueprintExports/README.md` 已移除，不再导出，避免在大项目里制造高噪音、低信息密度的重复上下文。
+**冗余元数据文件**：`BlueprintExports/README.md` 和 `_index.txt` 都已移除，不再导出，避免在大项目里制造高噪音、低信息密度的重复上下文。
 
 **文件名规则**：图表名经 `SanitizeFileName()` 处理——只保留字母、数字、`_`、`-`，其余字符替换为 `_`。
 
@@ -246,7 +245,7 @@ KismetSystemLibrary::K2_SetTimerDelegate
 - Compact 执行流树整合进 `_summary.txt`（不再单独生成 `_compact.txt`）
 - 新增 `=== Configuration ===` 区，导出 CDO 属性配置（GE / GA 专用格式 + 通用 fallback）
 - `GameplayEffect` / `GameplayAbility` 使用父类差异导出：和父类默认值相同的配置不重复输出
-- `_index.txt` 改为单行检索格式，面向 `rg/grep` 使用
+- 移除 `BlueprintExports/_index.txt`，避免维护低价值全局索引
 
 ### 5.2 变量格式
 
@@ -617,7 +616,7 @@ CDO 导出的枚举字符串（格式 `EAI_State::NewEnumerator0`）在读取 CD
 
 ### 阅读顺序
 
-1. 不要整文件通读 `_index.txt`；先用 `rg/grep` 按名称、前缀或父类检索
+1. 先按蓝图名定位对应的导出目录
 2. 需要某个蓝图的细节时，先读其 `_summary.txt`
 3. 只在需要修改具体节点时才读单个 Graph 文件
 4. 不要一次性读取整个蓝图的完整导出
@@ -657,8 +656,7 @@ CDO 导出的枚举字符串（格式 `EAI_State::NewEnumerator0`）在读取 CD
 - **GAS 特化导出**：`GameplayEffect` / `GameplayAbility` 拥有专用提取器与专用 formatter
 - **父类差异导出**：专用配置也会与 `ParentCDO` 比较，和父类默认值一致的字段不导出
 - **继承提示**：子类 GE / GA 在 `_summary.txt` 中输出 `ParentConfig`
-- **索引降噪**：不再导出 `BlueprintExports/README.md`
-- **检索式入口**：`_index.txt` 改为单行记录，`AGENTS.md` 明确要求使用 `rg/grep`
+- **元数据降噪**：不再导出 `BlueprintExports/README.md` 与 `_index.txt`
 
 ### v10
 
