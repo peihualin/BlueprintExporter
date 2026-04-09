@@ -25,6 +25,14 @@ struct FExportedVariable
 	TArray<FString> Flags;  // "EditAnywhere", "BlueprintReadWrite", etc.
 };
 
+struct FExportedComponent
+{
+	FString Name;
+	FString Class;
+	FString Detail;
+	int32 Depth = 0;
+};
+
 struct FExportedGraph; // Forward declaration for SubGraph
 
 struct FExportedNode
@@ -54,6 +62,9 @@ struct FExportedBlueprint
 	FString ParentClass;
 	FString ConfigType;         // "Generic", "GameplayEffect", "GameplayAbility"
 	FString ParentConfigSource; // Blueprint parent config source, if any
+	FString AssetPath;
+	TArray<FString> ImplementedInterfaces;
+	TArray<FExportedComponent> Components;
 	TArray<FExportedVariable> Variables;
 	TArray<FExportedGraph> Graphs;
 

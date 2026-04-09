@@ -46,4 +46,7 @@ private:
 		TArray<TPair<FString, FString>>& OutProperties);
 
 	static FString ExportLeafValue(FProperty* Prop, const void* ValuePtr);
+
+	static void ExtractComponents(UBlueprint* Blueprint, TArray<FExportedComponent>& OutComponents);
+	static void ExtractSCSNode(class USCS_Node* Node, int32 Depth, TArray<FExportedComponent>& OutComponents);
 };

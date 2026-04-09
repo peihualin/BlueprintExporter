@@ -1,6 +1,12 @@
 #include "BlueprintGraphExtractor.h"
 
 #include "Engine/Blueprint.h"
+#include "Engine/SimpleConstructionScript.h"
+#include "Engine/SCS_Node.h"
+#include "Engine/StaticMesh.h"
+#include "Components/StaticMeshComponent.h"
+#include "Components/SkeletalMeshComponent.h"
+#include "Components/ChildActorComponent.h"
 #include "EdGraph/EdGraph.h"
 #include "EdGraph/EdGraphNode.h"
 #include "EdGraph/EdGraphPin.h"
@@ -344,6 +350,26 @@ FExportedBlueprint FBlueprintGraphExtractor::Extract(UBlueprint* Blueprint)
 			}
 		}
 	}
+
+	// Asset path
+	Result.AssetPath = Blueprint->GetOutermost()->GetName();
+
+	// Implemented interfaces (names)
+	for (const FBPInterfaceDescription& InterfaceDesc : Blueprint->ImplementedInterfaces)
+	{
+		if (InterfaceDesc.Interface)
+		{
+			FString InterfaceName = InterfaceDesc.Interface->GetName();
+			if (InterfaceName.EndsWith(TEXT("_C")))
+			{
+				InterfaceName.LeftChopInline(2);
+			}
+			Result.ImplementedInterfaces.Add(InterfaceName);
+		}
+	}
+
+	// Component hierarchy
+	ExtractComponents(Blueprint, Result.Components);
 
 	// CDO configuration extraction
 	if (Blueprint->GeneratedClass)
@@ -810,6 +836,72 @@ FString FBlueprintGraphExtractor::ResolveVariableType(const FEdGraphPinType& Pin
 	}
 
 	return PinType.PinCategory.ToString();
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Component Hierarchy Extraction
+// ────────────────────────────────────────────────────────────────────────────
+
+void FBlueprintGraphExtractor::ExtractComponents(UBlueprint* Blueprint, TArray<FExportedComponent>& OutComponents)
+{
+	USimpleConstructionScript* SCS = Blueprint->SimpleConstructionScript;
+	if (!SCS)
+	{
+		return;
+	}
+
+	const TArray<USCS_Node*>& RootNodes = SCS->GetRootNodes();
+	for (USCS_Node* Node : RootNodes)
+	{
+		ExtractSCSNode(Node, 0, OutComponents);
+	}
+}
+
+void FBlueprintGraphExtractor::ExtractSCSNode(USCS_Node* Node, int32 Depth, TArray<FExportedComponent>& OutComponents)
+{
+	if (!Node || !Node->ComponentTemplate)
+	{
+		return;
+	}
+
+	FExportedComponent Comp;
+	Comp.Name = Node->GetVariableName().ToString();
+	Comp.Class = Node->ComponentTemplate->GetClass()->GetName();
+	Comp.Depth = Depth;
+
+	if (UStaticMeshComponent* SMC = Cast<UStaticMeshComponent>(Node->ComponentTemplate))
+	{
+		if (SMC->GetStaticMesh())
+		{
+			Comp.Detail = SMC->GetStaticMesh()->GetName();
+		}
+	}
+	else if (USkeletalMeshComponent* SkMC = Cast<USkeletalMeshComponent>(Node->ComponentTemplate))
+	{
+		if (USkeletalMesh* Mesh = SkMC->GetSkeletalMeshAsset())
+		{
+			Comp.Detail = Mesh->GetName();
+		}
+	}
+	else if (UChildActorComponent* CAC = Cast<UChildActorComponent>(Node->ComponentTemplate))
+	{
+		if (CAC->GetChildActorClass())
+		{
+			FString ClassName = CAC->GetChildActorClass()->GetName();
+			if (ClassName.EndsWith(TEXT("_C")))
+			{
+				ClassName.LeftChopInline(2);
+			}
+			Comp.Detail = ClassName;
+		}
+	}
+
+	OutComponents.Add(MoveTemp(Comp));
+
+	for (USCS_Node* ChildNode : Node->GetChildNodes())
+	{
+		ExtractSCSNode(ChildNode, Depth + 1, OutComponents);
+	}
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -1604,13 +1696,28 @@ void FBlueprintGraphExtractor::FlattenProperty(
 			return;
 		}
 
+		// For struct elements, create a default instance to filter out trivial sub-properties
+		void* DefaultElement = nullptr;
+		FStructProperty* InnerStructProp = CastField<FStructProperty>(ArrayProp->Inner);
+		if (InnerStructProp)
+		{
+			DefaultElement = FMemory::Malloc(InnerStructProp->Struct->GetStructureSize());
+			InnerStructProp->Struct->InitializeStruct(static_cast<uint8*>(DefaultElement));
+		}
+
 		for (int32 i = 0; i < ArrayHelper.Num(); ++i)
 		{
 			FString ElemPrefix = FString::Printf(TEXT("%s[%d]"), *Prefix, i);
 			FlattenProperty(
 				ArrayProp->Inner,
-				ArrayHelper.GetRawPtr(i), nullptr,
+				ArrayHelper.GetRawPtr(i), DefaultElement,
 				ElemPrefix, OutProperties);
+		}
+
+		if (DefaultElement)
+		{
+			InnerStructProp->Struct->DestroyStruct(static_cast<uint8*>(DefaultElement));
+			FMemory::Free(DefaultElement);
 		}
 		return;
 	}

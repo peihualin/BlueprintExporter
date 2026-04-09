@@ -14,7 +14,30 @@ FString FBlueprintTextFormatter::Format(const FExportedBlueprint& Blueprint)
 	{
 		Lines.Add(FString::Printf(TEXT("=== Blueprint: %s ==="), *Blueprint.BlueprintName));
 	}
+
+	if (!Blueprint.AssetPath.IsEmpty())
+	{
+		Lines.Add(FString::Printf(TEXT("Path: %s"), *Blueprint.AssetPath));
+	}
+
+	if (Blueprint.ImplementedInterfaces.Num() > 0)
+	{
+		Lines.Add(FString::Printf(TEXT("Interfaces: %s"),
+			*FString::Join(Blueprint.ImplementedInterfaces, TEXT(", "))));
+	}
+
 	Lines.Add(TEXT(""));
+
+	// Component hierarchy
+	if (Blueprint.Components.Num() > 0)
+	{
+		FString CompSection = FormatComponents(Blueprint.Components);
+		if (!CompSection.IsEmpty())
+		{
+			Lines.Add(CompSection);
+			Lines.Add(TEXT(""));
+		}
+	}
 
 	// Variables section
 	if (Blueprint.Variables.Num() > 0)
@@ -74,6 +97,30 @@ FString FBlueprintTextFormatter::FormatVariables(const TArray<FExportedVariable>
 			Line += FString::Printf(TEXT("  [%s]"), *FString::Join(Var.Flags, TEXT(", ")));
 		}
 
+		Lines.Add(Line);
+	}
+
+	return FString::Join(Lines, TEXT("\n"));
+}
+
+FString FBlueprintTextFormatter::FormatComponents(const TArray<FExportedComponent>& Components)
+{
+	if (Components.Num() == 0)
+	{
+		return FString();
+	}
+
+	TArray<FString> Lines;
+	Lines.Add(TEXT("=== Components ==="));
+
+	for (const FExportedComponent& Comp : Components)
+	{
+		FString Indent = FString::ChrN((Comp.Depth + 1) * 2, TEXT(' '));
+		FString Line = FString::Printf(TEXT("%s%s : %s"), *Indent, *Comp.Name, *Comp.Class);
+		if (!Comp.Detail.IsEmpty())
+		{
+			Line += FString::Printf(TEXT(" (%s)"), *Comp.Detail);
+		}
 		Lines.Add(Line);
 	}
 
@@ -843,7 +890,30 @@ FString FBlueprintTextFormatter::FormatSummary(const FExportedBlueprint& Bluepri
 		Lines.Add(FString::Printf(TEXT("=== Blueprint: %s (Parent: %s) ==="),
 			*Blueprint.BlueprintName, *Blueprint.ParentClass));
 	}
+
+	if (!Blueprint.AssetPath.IsEmpty())
+	{
+		Lines.Add(FString::Printf(TEXT("Path: %s"), *Blueprint.AssetPath));
+	}
+
+	if (Blueprint.ImplementedInterfaces.Num() > 0)
+	{
+		Lines.Add(FString::Printf(TEXT("Interfaces: %s"),
+			*FString::Join(Blueprint.ImplementedInterfaces, TEXT(", "))));
+	}
+
 	Lines.Add(TEXT(""));
+
+	// Component hierarchy
+	if (Blueprint.Components.Num() > 0)
+	{
+		FString CompSection = FormatComponents(Blueprint.Components);
+		if (!CompSection.IsEmpty())
+		{
+			Lines.Add(CompSection);
+			Lines.Add(TEXT(""));
+		}
+	}
 
 	// Variables section (reuse existing FormatVariables)
 	if (Blueprint.Variables.Num() > 0)

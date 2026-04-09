@@ -3,6 +3,7 @@
 #include "Modules/ModuleManager.h"
 
 class UBlueprintExporterSettings;
+struct FExportedBlueprint;
 
 class FBlueprintExporterModule : public IModuleInterface
 {
@@ -22,11 +23,12 @@ private:
 	void OnPackageSaved(const FString& PackageFilename, UPackage* Package,
 	                    FObjectPostSaveContext SaveContext);
 	void OnEditorPreExit();
-	bool ExportBlueprintToCache(UBlueprint* Blueprint);
+	bool ExportBlueprintToCache(UBlueprint* Blueprint, FExportedBlueprint* PreExtracted = nullptr);
 	void ExportAllBlueprints();
 	void GenerateAgentsMd();
 	void CleanupStaleExports(const TSet<FString>& CurrentBPNames);
-	bool ShouldExport(UBlueprint* Blueprint, const UBlueprintExporterSettings* Settings) const;
+	bool ShouldExport(UBlueprint* Blueprint, const UBlueprintExporterSettings* Settings,
+	                  FExportedBlueprint* OutExtracted = nullptr) const;
 	static FString SanitizeFileName(const FString& Name);
 	/** 比对内容并写入文件，内容相同则跳过。返回 true 表示实际写入了文件。 */
 	static bool WriteFileIfChanged(const FString& FilePath, const FString& Content);

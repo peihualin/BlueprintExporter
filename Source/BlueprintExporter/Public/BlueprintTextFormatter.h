@@ -14,6 +14,7 @@ public:
 
 private:
 	FString FormatVariables(const TArray<FExportedVariable>& Variables);
+	FString FormatComponents(const TArray<FExportedComponent>& Components);
 	FString FormatGraph(const FExportedGraph& Graph);
 	FString FormatNode(const FExportedNode& Node, const TMap<FString, const FExportedNode*>& NodeMap);
 	FString FormatPin(const FExportedPin& Pin, const TMap<FString, const FExportedNode*>& NodeMap);

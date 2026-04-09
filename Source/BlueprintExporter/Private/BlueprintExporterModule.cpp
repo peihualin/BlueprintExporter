@@ -31,6 +31,93 @@ DEFINE_LOG_CATEGORY_STATIC(LogBlueprintExporter, Log, All);
 
 #define LOCTEXT_NAMESPACE "BlueprintExporter"
 
+namespace
+{
+int32 CountExtractedNodes(const FExportedBlueprint& Blueprint)
+{
+	int32 TotalNodes = 0;
+	for (const FExportedGraph& Graph : Blueprint.Graphs)
+	{
+		TotalNodes += Graph.Nodes.Num();
+	}
+	return TotalNodes;
+}
+
+bool HasConfigOnlyExportContent(const FExportedBlueprint& Blueprint)
+{
+	return Blueprint.CDOProperties.Num() > 0
+		|| !Blueprint.ParentConfigSource.IsEmpty();
+}
+
+bool HasStructuralExportContent(const FExportedBlueprint& Blueprint)
+{
+	return Blueprint.Variables.Num() > 0
+		|| Blueprint.ImplementedInterfaces.Num() > 0
+		|| Blueprint.Components.Num() > 0;
+}
+
+bool MatchesParentClassList(UClass* ParentClass, const TArray<FSoftClassPath>& CandidatePaths)
+{
+	if (!ParentClass)
+	{
+		return false;
+	}
+
+	for (const FSoftClassPath& CandidatePath : CandidatePaths)
+	{
+		UClass* CandidateClass = CandidatePath.ResolveClass();
+		if (CandidateClass && ParentClass->IsChildOf(CandidateClass))
+		{
+			return true;
+		}
+	}
+
+	return false;
+}
+
+bool CachedSummaryLikelyHasLogic(const FString& SummaryPath)
+{
+	FString SummaryText;
+	if (!FFileHelper::LoadFileToString(SummaryText, *SummaryPath))
+	{
+		return false;
+	}
+
+	TArray<FString> Lines;
+	SummaryText.ParseIntoArrayLines(Lines, true);
+	for (const FString& Line : Lines)
+	{
+		if (Line.StartsWith(TEXT("--- ")))
+		{
+			return true;
+		}
+
+		if (Line.StartsWith(TEXT("[")) && Line.EndsWith(TEXT("]:")))
+		{
+			return true;
+		}
+
+		if (Line.StartsWith(TEXT("=== "))
+			&& !Line.StartsWith(TEXT("=== Blueprint:"))
+			&& Line != TEXT("=== Variables ===")
+			&& Line != TEXT("=== Configuration ===")
+			&& Line.Contains(TEXT("(")))
+		{
+			return true;
+		}
+	}
+
+	return false;
+}
+
+void DeleteCachedExportDirectory(const FString& BlueprintName)
+{
+	const FString ExportDir = FPaths::Combine(
+		FPaths::ProjectDir(), TEXT("BlueprintExports"), BlueprintName);
+	IFileManager::Get().DeleteDirectory(*ExportDir, /*RequireExists=*/false, /*Tree=*/true);
+}
+}
+
 void FBlueprintExporterModule::StartupModule()
 {
 	UToolMenus::RegisterStartupCallback(
@@ -114,7 +201,7 @@ void FBlueprintExporterModule::RegisterMenus()
 	Section.AddMenuEntry(
 		"ExportAllBlueprintsToCache",
 		LOCTEXT("ExportAllLabel", "Export All Blueprints to Cache"),
-		LOCTEXT("ExportAllTooltip", "Scan all Blueprints and export to Saved/BlueprintExports/"),
+		LOCTEXT("ExportAllTooltip", "Scan all Blueprints and export to ProjectDir/BlueprintExports/"),
 		FSlateIcon(),
 		FToolMenuExecuteAction::CreateLambda([this](const FToolMenuContext&)
 		{
@@ -403,7 +490,8 @@ FDateTime FBlueprintExporterModule::GetAssetFileTimestamp(const FAssetData& Asse
 }
 
 bool FBlueprintExporterModule::ShouldExport(UBlueprint* Blueprint,
-	const UBlueprintExporterSettings* Settings) const
+	const UBlueprintExporterSettings* Settings,
+	FExportedBlueprint* OutExtracted) const
 {
 	if (!Blueprint || !Settings)
 	{
@@ -434,51 +522,50 @@ bool FBlueprintExporterModule::ShouldExport(UBlueprint* Blueprint,
 
 	// Blacklist: excluded parent classes
 	UClass* ParentClass = Blueprint->ParentClass;
-	for (const FSoftClassPath& ExcludedPath : Settings->ExcludedParentClasses)
-	{
-		UClass* ExcludedClass = ExcludedPath.ResolveClass();
-		if (ExcludedClass && ParentClass && ParentClass->IsChildOf(ExcludedClass))
-		{
-			return false;
-		}
-	}
-
-	// Whitelist: parent class filter (empty = no restriction)
-	if (Settings->ParentClassFilter.Num() > 0)
-	{
-		bool bPassesWhitelist = false;
-		for (const FSoftClassPath& WhitelistPath : Settings->ParentClassFilter)
-		{
-			UClass* WhitelistClass = WhitelistPath.ResolveClass();
-			if (WhitelistClass && ParentClass && ParentClass->IsChildOf(WhitelistClass))
-			{
-				bPassesWhitelist = true;
-				break;
-			}
-		}
-		if (!bPassesWhitelist)
-		{
-			return false;
-		}
-	}
-
-	// Node count filter
-	int32 TotalNodes = 0;
-	for (const UEdGraph* Graph : Blueprint->UbergraphPages)
-	{
-		TotalNodes += Graph->Nodes.Num();
-	}
-	for (const UEdGraph* Graph : Blueprint->FunctionGraphs)
-	{
-		TotalNodes += Graph->Nodes.Num();
-	}
-
-	if (TotalNodes < Settings->MinNodeCount)
+	if (MatchesParentClassList(ParentClass, Settings->ExcludedParentClasses))
 	{
 		return false;
 	}
 
-	return true;
+	// Whitelist: parent class filter (empty = no restriction)
+	if (Settings->ParentClassFilter.Num() > 0
+		&& !MatchesParentClassList(ParentClass, Settings->ParentClassFilter))
+	{
+		return false;
+	}
+
+	FBlueprintGraphExtractor Extractor;
+	FExportedBlueprint ExportedBP = Extractor.Extract(Blueprint);
+	const int32 ExtractedNodeCount = CountExtractedNodes(ExportedBP);
+	const bool bHasConfigOnlyContent = HasConfigOnlyExportContent(ExportedBP);
+	const bool bHasStructuralContent = HasStructuralExportContent(ExportedBP);
+
+	if (ExtractedNodeCount == 0 && !bHasConfigOnlyContent && !bHasStructuralContent)
+	{
+		return false;
+	}
+
+	bool bShouldExport;
+	if (ExtractedNodeCount > 0)
+	{
+		bShouldExport = ExtractedNodeCount >= Settings->MinNodeCount;
+	}
+	else if (bHasStructuralContent)
+	{
+		// Blueprints that only carry structural context should still export even without graph nodes.
+		bShouldExport = true;
+	}
+	else
+	{
+		// Pure config-only exports are opt-in to avoid flooding the cache with data-only assets.
+		bShouldExport = MatchesParentClassList(ParentClass, Settings->ConfigOnlyParentClassWhitelist);
+	}
+
+	if (bShouldExport && OutExtracted)
+	{
+		*OutExtracted = MoveTemp(ExportedBP);
+	}
+	return bShouldExport;
 }
 
 void FBlueprintExporterModule::OnPackageSaved(const FString& /*PackageFilename*/,
@@ -493,10 +580,20 @@ void FBlueprintExporterModule::OnPackageSaved(const FString& /*PackageFilename*/
 	ForEachObjectWithPackage(Package, [this, Settings](UObject* Obj) -> bool
 	{
 		UBlueprint* BP = Cast<UBlueprint>(Obj);
-		if (BP && ShouldExport(BP, Settings))
+		if (!BP)
 		{
-			ExportBlueprintToCache(BP);
+			return true;
+		}
+
+		FExportedBlueprint ExtractedBP;
+		if (ShouldExport(BP, Settings, &ExtractedBP))
+		{
+			ExportBlueprintToCache(BP, &ExtractedBP);
 			GenerateAgentsMd();
+		}
+		else
+		{
+			DeleteCachedExportDirectory(BP->GetName());
 		}
 		return true;
 	});
@@ -513,15 +610,23 @@ void FBlueprintExporterModule::OnEditorPreExit()
 	ExportAllBlueprints();
 }
 
-bool FBlueprintExporterModule::ExportBlueprintToCache(UBlueprint* Blueprint)
+bool FBlueprintExporterModule::ExportBlueprintToCache(UBlueprint* Blueprint, FExportedBlueprint* PreExtracted)
 {
 	if (!Blueprint)
 	{
 		return false;
 	}
 
-	FBlueprintGraphExtractor Extractor;
-	FExportedBlueprint ExportedBP = Extractor.Extract(Blueprint);
+	FExportedBlueprint ExportedBP;
+	if (PreExtracted)
+	{
+		ExportedBP = MoveTemp(*PreExtracted);
+	}
+	else
+	{
+		FBlueprintGraphExtractor Extractor;
+		ExportedBP = Extractor.Extract(Blueprint);
+	}
 
 	FBlueprintTextFormatter Formatter;
 
@@ -601,7 +706,7 @@ void FBlueprintExporterModule::ExportAllBlueprints()
 		const FString SummaryPath      = ExportDir / SanitizedName / TEXT("_summary.txt");
 		const FDateTime ExportTimestamp = IFileManager::Get().GetTimeStamp(*SummaryPath);
 
-		if (ExportTimestamp > FDateTime::MinValue())
+		if (ExportTimestamp > FDateTime::MinValue() && CachedSummaryLikelyHasLogic(SummaryPath))
 		{
 			const FDateTime UassetTimestamp = GetAssetFileTimestamp(AssetData);
 			if (UassetTimestamp > FDateTime::MinValue() && ExportTimestamp >= UassetTimestamp)
@@ -620,14 +725,15 @@ void FBlueprintExporterModule::ExportAllBlueprints()
 			continue;
 		}
 
-		if (!ShouldExport(BP, Settings))
+		FExportedBlueprint ExtractedBP;
+		if (!ShouldExport(BP, Settings, &ExtractedBP))
 		{
 			FilteredCount++;
 			continue;
 		}
 
 		// ── 第二层：内容比对在 ExportBlueprintToCache 内部执行 ──
-		const bool bActuallyWrote = ExportBlueprintToCache(BP);
+		const bool bActuallyWrote = ExportBlueprintToCache(BP, &ExtractedBP);
 		ExportedCount++;
 		CurrentBPNames.Add(SanitizedName);
 
@@ -662,6 +768,9 @@ static const TCHAR* GAgentsMdContent = TEXT(
 	"\n"
 	"`_summary.txt` is the primary entry point. It merges four kinds of information:\n"
 	"- Blueprint header: `=== Blueprint: Name (Parent: ParentClass) ===`\n"
+	"- Asset path: `Path: /Game/...` (source asset location in content browser)\n"
+	"- Interfaces: `Interfaces: Name1, Name2` (implemented blueprint interfaces, if any)\n"
+	"- Component hierarchy: `=== Components ===` (blueprint-added components with attachment tree)\n"
 	"- Variables: `=== Variables ===`\n"
 	"- Configuration: `=== Configuration ===`\n"
 	"- Compact graph flow: sections like `--- EventGraph ---` or `=== FuncName(...) ===`\n"
@@ -676,6 +785,12 @@ static const TCHAR* GAgentsMdContent = TEXT(
 	"- `GameplayEffect` and `GameplayAbility` use specialized config export.\n"
 	"- For specialized GAS assets, values equal to the parent default are omitted.\n"
 	"- `ParentConfig: SomeParentBP` means inherited values are intentionally not repeated; inspect the parent `_summary.txt` when needed.\n"
+	"\n"
+	"### Components\n"
+	"- `=== Components ===` shows the component hierarchy added by this blueprint.\n"
+	"- Format: `Name : ClassName` optionally followed by `(Detail)` for mesh/asset names.\n"
+	"- Indentation reflects parent-child attachment in the scene hierarchy.\n"
+	"- Only blueprint-added components are shown; inherited components from native C++ parent classes are not listed.\n"
 	"\n"
 	"### Compact graph flow\n"
 	"- `--- EventGraph ---` starts a compact event graph section.\n"
@@ -718,13 +833,22 @@ static const TCHAR* GAgentsMdContent = TEXT(
 	"- `Source [Label] --> Target` means flow through a labeled exec pin.\n"
 	"- Use this section when you need precise node-to-node ordering beyond the compact tree in `_summary.txt`.\n"
 	"\n"
+	"## Naming Conventions\n"
+	"\n"
+	"| Prefix | Type | Reading Strategy |\n"
+	"|--------|------|------------------|\n"
+	"| `GA_` | GameplayAbility | Focus on Configuration + activation flow |\n"
+	"| `GE_` | GameplayEffect | `_summary.txt` Configuration is usually sufficient |\n"
+	"| `GC_` | GameplayCue | `_summary.txt` first; graph files only if non-trivial |\n"
+	"| `BP_` | General Actor/Object | Components + Variables + graph logic |\n"
+	"| `BPV_` | Visual effect blueprint | Components + EventGraph |\n"
+	"\n"
 	"## Practical Guidance\n"
 	"\n"
-	"- `GA_*`: start with `_summary.txt`; focus on Configuration and activation flow.\n"
-	"- `GE_*`: usually config-only or config-heavy; `_summary.txt` is usually sufficient.\n"
-	"- `GC_*`: read `_summary.txt`, then graph files only if behavior is non-trivial.\n"
-	"- If a GAS child asset looks too small, check `ParentConfig` and then read the parent asset's `_summary.txt`.\n"
-	"- Prefer semantic titles and config keys in explanations; do not center explanations around raw node IDs.\n"
+	"- GAS blueprints use **diff export**: child blueprints only show values that differ from the parent. If a child looks too sparse, check `ParentConfig` and read the parent's `_summary.txt`.\n"
+	"- Prefer semantic titles (e.g. `KismetMathLibrary::RandomInteger`) over raw node IDs when discussing logic.\n"
+	"- `[continues...]` means the exporter stopped expanding a previously visited branch to avoid cycles.\n"
+	"- Component hierarchy only includes blueprint-added components; inherited C++ components are implied by the parent class.\n"
 );
 
 void FBlueprintExporterModule::GenerateAgentsMd()

@@ -1,6 +1,6 @@
 # BlueprintExporter 插件参考文档
 
-> 适用版本：v11（GAS 特化导出 + 父类差异配置 + 检索式索引）
+> 适用版本：v12（资产路径/接口/组件层级导出 + Config-only 白名单）
 > 引擎：Unreal Engine 5.x（Editor-only Plugin）
 > 作者：Capybara、Claude
 
@@ -25,6 +25,8 @@
 BlueprintExporter 是一个 UE5 Editor-only 插件，将蓝图的节点图（EventGraph、函数、宏、接口实现）导出为 AI 可读的纯文本格式。
 
 **核心用途**：将蓝图逻辑完整地描述给 AI，辅助理解与转写为 C++。
+
+除图表逻辑外，`_summary.txt` 还会补充蓝图资产路径、已实现接口、蓝图新增组件层级等结构化上下文，减少 AI 只看节点时丢失场景信息的问题。
 
 **六项核心功能**：
 
@@ -126,11 +128,19 @@ Blueprint Exporter
 |`ParentClassFilter`|`TArray<FSoftClassPath>`|白名单：只导出继承自列表中类的蓝图；**留空 = 不限制**|
 |`ExcludedParentClasses`|`TArray<FSoftClassPath>`|黑名单：排除继承自列表中类的蓝图；**优先级高于白名单**|
 
+### Export Filter — Config Only
+
+|属性|类型|默认值|说明|
+|-|-|-|-|
+|`ConfigOnlyParentClassWhitelist`|`TArray<FSoftClassPath>`|`GameplayAbility`、`GameplayEffect`、`GameplayCueNotify_Actor`、`GameplayCueNotify_Static`|当蓝图在提取后**没有任何图表逻辑节点**，但仍有 CDO 配置差异时，只允许这些父类家族继续导出，避免把大量纯数据资产全部刷进缓存|
+
+**关键语义**：如果蓝图虽然没有图节点，但仍然有**变量 / 已实现接口 / 组件层级**等结构化内容，则依然会导出；`ConfigOnlyParentClassWhitelist` 只限制“纯配置型”导出。
+
 ### Export Filter — Content
 
 |属性|类型|默认值|说明|
 |-|-|-|-|
-|`MinNodeCount`|`int32`|`0`|所有图表中节点总数低于此值时跳过导出（设为 0 可导出 GE 等无节点蓝图）|
+|`MinNodeCount`|`int32`|`0`|对**仍有图表逻辑**的蓝图生效；提取/清理后节点总数低于此值时跳过导出|
 
 ---
 
@@ -143,7 +153,7 @@ Blueprint Exporter
 ├── AGENTS.md                       ← AI 引导文件（自动生成，说明先读 `_summary.txt`）
 │
 ├── AC_EnemyAI/
-│   ├── _summary.txt                ← 变量 + CDO 配置 + 执行流概览（先读这个）
+│   ├── _summary.txt                ← 资产路径 + 接口 + 组件 + 变量 + CDO 配置 + 执行流概览（先读这个）
 │   ├── EventGraph.txt              ← EventGraph 完整内容
 │   └── SetCurrentState.txt         ← 函数图 SetCurrentState 的完整内容
 │
@@ -153,7 +163,7 @@ Blueprint Exporter
 └── ...
 ```
 
-**AGENTS.md**：每次导出时自动生成（内容内嵌于插件源码 `GAgentsMdContent`），说明如何阅读 `_summary.txt` / 图表导出。使用 `WriteFileIfChanged()` 保证内容不变时不更新文件时间戳。
+**AGENTS.md**：每次导出时自动生成（内容内嵌于插件源码 `GAgentsMdContent`），说明如何阅读 `_summary.txt` / 图表导出。当前会特别提示 `Path:`、`Interfaces:`、`=== Components ===` 这些结构化上下文字段。使用 `WriteFileIfChanged()` 保证内容不变时不更新文件时间戳。
 
 **冗余元数据文件**：`BlueprintExports/README.md` 和 `_index.txt` 都已移除，不再导出，避免在大项目里制造高噪音、低信息密度的重复上下文。
 
@@ -161,12 +171,19 @@ Blueprint Exporter
 
 ### _summary.txt 内容示例
 
-`_summary.txt` 整合了变量、CDO 配置和执行流概览，是阅读蓝图的入口文件。
+`_summary.txt` 整合了资产路径、接口、组件层级、变量、CDO 配置和执行流概览，是阅读蓝图的入口文件。
 
 **普通蓝图示例**（含图表逻辑）：
 
 ```
 === Blueprint: BP_DamageVolume (Parent: Actor) ===
+Path: /Game/Blueprints/BP_DamageVolume
+Interfaces: BPI_Damageable
+
+=== Components ===
+  DefaultSceneRoot : SceneComponent
+  DamageVolume : BoxComponent
+  VFXMesh : StaticMeshComponent (SM_DamageVolume)
 
 === Variables ===
   Damage : double = 25.000000
@@ -220,6 +237,11 @@ KismetSystemLibrary::K2_SetTimerDelegate
 
 ```
 === Blueprint: {Name} (Parent: {Parent}) ===
+Path: /Game/...
+Interfaces: InterfaceA, InterfaceB
+
+=== Components ===
+  {ComponentName} : {ComponentClass} ({OptionalAssetOrChildActor})
 
 === Variables ===
   {VarName} : {Type} [= {Default}]  [Flags]
@@ -237,7 +259,10 @@ KismetSystemLibrary::K2_SetTimerDelegate
   {SourceNode} [{PinLabel}] --> {TargetNode}
 ```
 
-**v9/v10/v11 变化**：
+**v9/v10/v11/v12 变化**：
+- `_summary.txt` 和完整单文件导出都可输出 `Path:` 资产路径与 `Interfaces:` 已实现接口列表
+- 新增 `=== Components ===` 区，导出蓝图新增组件的层级结构，并附带静态网格/骨骼网格/ChildActor 的简要详情
+- “纯配置型蓝图”导出改为受 `ConfigOnlyParentClassWhitelist` 控制；只有配置差异但没有图逻辑的资产不再无差别导出
 - Pin 连接目标使用语义节点名（如 `-> AbilitySystemComponent::MakeEffectContext.Target`）
 - 未连接且无设置值的输入 Pin 不输出（减少噪音）
 - 运算符节点显示具体操作名（如 `KismetMathLibrary::BooleanAND`）
@@ -534,6 +559,14 @@ struct FExportedVariable
     TArray<FString> Flags;  // "EditAnywhere", "BlueprintReadWrite", "Replicated", ...
 };
 
+struct FExportedComponent
+{
+    FString Name;
+    FString Class;
+    FString Detail;         // 静态网格/骨骼网格/ChildActor 类名等补充信息
+    int32 Depth = 0;        // 在组件树中的缩进层级
+};
+
 struct FExportedNode
 {
     FString NodeName;       // 对象名，如 "K2Node_Event_0"
@@ -558,6 +591,9 @@ struct FExportedBlueprint
     FString ParentClass;    // 去掉 _C 后缀
     FString ConfigType;     // "Generic" | "GameplayEffect" | "GameplayAbility"
     FString ParentConfigSource; // 父蓝图配置来源（若存在）
+    FString AssetPath;
+    TArray<FString> ImplementedInterfaces;
+    TArray<FExportedComponent> Components;
     TArray<FExportedVariable> Variables;
     TArray<FExportedGraph> Graphs;
     TArray<TPair<FString, FString>> CDOProperties;  // (SemanticKey, Value)
@@ -651,7 +687,14 @@ CDO 导出的枚举字符串（格式 `EAI_State::NewEnumerator0`）在读取 CD
 
 ## 附录：版本更新摘要
 
-### v11（当前版本）
+### v12（当前版本）
+
+- **结构化上下文导出**：`_summary.txt` / 单文件导出新增 `Path:`、`Interfaces:`、`=== Components ===`
+- **组件层级导出**：提取蓝图新增组件树，并附带 `StaticMesh` / `SkeletalMesh` / `ChildActor` 的关键详情
+- **Config-only 白名单**：新增 `ConfigOnlyParentClassWhitelist`，只允许指定父类家族进行“纯配置型”导出
+- **筛选语义修正**：即使没有图节点，只要蓝图仍有变量、接口或组件层级等结构化内容，也不会被误判为无意义导出
+
+### v11
 
 - **GAS 特化导出**：`GameplayEffect` / `GameplayAbility` 拥有专用提取器与专用 formatter
 - **父类差异导出**：专用配置也会与 `ParentCDO` 比较，和父类默认值一致的字段不导出
