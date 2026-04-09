@@ -3,6 +3,7 @@
 #include "Modules/ModuleManager.h"
 
 class UBlueprintExporterSettings;
+class UFlowAsset;
 struct FExportedBlueprint;
 
 class FBlueprintExporterModule : public IModuleInterface
@@ -30,10 +31,14 @@ private:
 	bool ShouldExport(UBlueprint* Blueprint, const UBlueprintExporterSettings* Settings,
 	                  FExportedBlueprint* OutExtracted = nullptr) const;
 	static FString SanitizeFileName(const FString& Name);
-	/** 比对内容并写入文件，内容相同则跳过。返回 true 表示实际写入了文件。 */
 	static bool WriteFileIfChanged(const FString& FilePath, const FString& Content);
-	/** 获取蓝图 .uasset 文件的磁盘修改时间。返回 FDateTime::MinValue() 表示无法获取。 */
 	static FDateTime GetAssetFileTimestamp(const FAssetData& AssetData);
+
+	// --- FlowAsset Export ---
+	bool ExportFlowAssetToCache(UFlowAsset* FlowAsset);
+	void ExportAllFlowAssets();
+	void GenerateFlowAgentsMd();
+	void CleanupStaleFlowExports(const TSet<FString>& CurrentNames);
 
 	int32 GraphEditorMenuExtenderIndex = INDEX_NONE;
 	FDelegateHandle ModulesChangedHandle;

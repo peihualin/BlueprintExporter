@@ -19,6 +19,14 @@ public:
 	UPROPERTY(Config, EditAnywhere, Category="Auto Export")
 	bool bExportOnEditorClose = false;
 
+	// FlowAsset Export
+	UPROPERTY(Config, EditAnywhere, Category="FlowAsset Export",
+		meta=(DisplayName="Export FlowAssets"))
+	bool bExportFlowAssets = true;
+	UPROPERTY(Config, EditAnywhere, Category="FlowAsset Export",
+		meta=(DisplayName="Auto Export FlowAsset On Save"))
+	bool bAutoExportFlowAssetOnSave = false;
+
 	// Blueprint Type Filter
 	UPROPERTY(Config, EditAnywhere, Category="Export Filter|Blueprint Type")
 	bool bExportNormalBlueprint = true;

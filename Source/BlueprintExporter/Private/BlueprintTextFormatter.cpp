@@ -1,18 +1,31 @@
 #include "BlueprintTextFormatter.h"
 
+static bool IsFlowAsset(const FExportedBlueprint& Blueprint)
+{
+	return Blueprint.ConfigType == TEXT("FlowAsset");
+}
+
+static bool IsFlowRerouteNode(const FString& NodeClass)
+{
+	return NodeClass == TEXT("K2Node_Knot")
+		|| NodeClass == TEXT("FlowNode_Reroute");
+}
+
 FString FBlueprintTextFormatter::Format(const FExportedBlueprint& Blueprint)
 {
 	TArray<FString> Lines;
 
 	// Header
+	const TCHAR* AssetLabel = IsFlowAsset(Blueprint) ? TEXT("FlowAsset") : TEXT("Blueprint");
+	const TCHAR* ParentLabel = IsFlowAsset(Blueprint) ? TEXT("ExpectedOwner") : TEXT("Parent");
 	if (!Blueprint.ParentClass.IsEmpty())
 	{
-		Lines.Add(FString::Printf(TEXT("=== Blueprint: %s (Parent: %s) ==="),
-			*Blueprint.BlueprintName, *Blueprint.ParentClass));
+		Lines.Add(FString::Printf(TEXT("=== %s: %s (%s: %s) ==="),
+			AssetLabel, *Blueprint.BlueprintName, ParentLabel, *Blueprint.ParentClass));
 	}
 	else
 	{
-		Lines.Add(FString::Printf(TEXT("=== Blueprint: %s ==="), *Blueprint.BlueprintName));
+		Lines.Add(FString::Printf(TEXT("=== %s: %s ==="), AssetLabel, *Blueprint.BlueprintName));
 	}
 
 	if (!Blueprint.AssetPath.IsEmpty())
@@ -137,9 +150,9 @@ FString FBlueprintTextFormatter::FormatGraph(const FExportedGraph& Graph)
 	TArray<FString> Lines;
 
 	// Graph header
-	if (Graph.GraphType == TEXT("EventGraph"))
+	if (Graph.GraphType == TEXT("EventGraph") || Graph.GraphType == TEXT("FlowGraph"))
 	{
-		Lines.Add(FString::Printf(TEXT("--- Graph: %s ---"), *Graph.GraphName));
+		Lines.Add(FString::Printf(TEXT("--- %s ---"), *Graph.GraphName));
 	}
 	else
 	{
@@ -155,13 +168,23 @@ FString FBlueprintTextFormatter::FormatGraph(const FExportedGraph& Graph)
 		NodeMap.Add(Node.NodeName, &Node);
 	}
 
+	// Disambiguation only for FlowGraph (Blueprint nodes already have unique IDs in headers)
+	if (Graph.GraphType == TEXT("FlowGraph"))
+	{
+		BuildDisambiguationMap(Graph.Nodes);
+	}
+	else
+	{
+		DisambiguationMap.Empty();
+	}
+
 	// Topological sort
 	TArray<FExportedNode> SortedNodes = TopologicalSort(Graph.Nodes);
 
 	// Format each node
 	for (const FExportedNode& Node : SortedNodes)
 	{
-		if (Node.NodeClass == TEXT("K2Node_Knot"))
+		if (IsFlowRerouteNode(Node.NodeClass))
 		{
 			continue;
 		}
@@ -190,7 +213,7 @@ FString FBlueprintTextFormatter::FormatNode(const FExportedNode& Node, const TMa
 	TArray<FString> Lines;
 
 	// Compact node header: [SemanticTitle] (ShortId)
-	FString SemanticTitle = GetSemanticTitle(Node);
+	FString SemanticTitle = GetDisambiguatedTitle(Node);
 	FString ShortId = GetShortNodeId(Node.NodeName);
 	Lines.Add(FString::Printf(TEXT("[%s] (%s)"), *SemanticTitle, *ShortId));
 
@@ -199,6 +222,7 @@ FString FBlueprintTextFormatter::FormatNode(const FExportedNode& Node, const TMa
 		TEXT("Event"), TEXT("Function"), TEXT("Variable"), TEXT("CastTo"),
 		TEXT("Macro"), TEXT("Timeline"), TEXT("Enum"), TEXT("Collapsed"),
 		TEXT("ComponentProperty"), TEXT("DelegateProperty"),
+		TEXT("DisplayName"), TEXT("SubGraphAsset"),
 	};
 
 	bool bHasOverride = false;
@@ -310,12 +334,12 @@ FString FBlueprintTextFormatter::FormatPin(const FExportedPin& Pin, const TMap<F
 				TargetPinName = Resolved.Value;
 			}
 
-			// Replace node ID with semantic title
+			// Replace node ID with semantic title (disambiguated if needed)
 			FString TargetTitle = TargetNodeName;
 			const FExportedNode* const* TargetPtr = NodeMap.Find(TargetNodeName);
 			if (TargetPtr && *TargetPtr)
 			{
-				TargetTitle = GetSemanticTitle(**TargetPtr);
+				TargetTitle = GetDisambiguatedTitle(**TargetPtr);
 			}
 
 			FString TargetStr = FString::Printf(TEXT("%s.%s"), *TargetTitle, *TargetPinName);
@@ -373,6 +397,31 @@ FString FBlueprintTextFormatter::GetReadableType(const FString& NodeClass) const
 		TypeMap.Add(TEXT("K2Node_ComponentBoundEvent"), TEXT("COMPONENT_EVENT"));
 		TypeMap.Add(TEXT("K2Node_Composite"), TEXT("COLLAPSED"));
 		TypeMap.Add(TEXT("K2Node_Tunnel"), TEXT("TUNNEL"));
+
+		// FlowNode types
+		TypeMap.Add(TEXT("FlowNode_Start"), TEXT("START"));
+		TypeMap.Add(TEXT("FlowNode_Finish"), TEXT("FINISH"));
+		TypeMap.Add(TEXT("FlowNode_Branch"), TEXT("BRANCH"));
+		TypeMap.Add(TEXT("FlowNode_ExecutionSequence"), TEXT("SEQUENCE"));
+		TypeMap.Add(TEXT("FlowNode_ExecutionMultiGate"), TEXT("MULTI_GATE"));
+		TypeMap.Add(TEXT("FlowNode_Counter"), TEXT("COUNTER"));
+		TypeMap.Add(TEXT("FlowNode_Timer"), TEXT("TIMER"));
+		TypeMap.Add(TEXT("FlowNode_LogicalAND"), TEXT("AND"));
+		TypeMap.Add(TEXT("FlowNode_LogicalOR"), TEXT("OR"));
+		TypeMap.Add(TEXT("FlowNode_SubGraph"), TEXT("SUB_GRAPH"));
+		TypeMap.Add(TEXT("FlowNode_CustomInput"), TEXT("CUSTOM_INPUT"));
+		TypeMap.Add(TEXT("FlowNode_CustomOutput"), TEXT("CUSTOM_OUTPUT"));
+		TypeMap.Add(TEXT("FlowNode_Reroute"), TEXT("REROUTE"));
+		TypeMap.Add(TEXT("FlowNode_Log"), TEXT("LOG"));
+		TypeMap.Add(TEXT("FlowNode_Checkpoint"), TEXT("CHECKPOINT"));
+		TypeMap.Add(TEXT("FlowNode_NotifyActor"), TEXT("NOTIFY_ACTOR"));
+		TypeMap.Add(TEXT("FlowNode_OnActorRegistered"), TEXT("ON_ACTOR_REGISTERED"));
+		TypeMap.Add(TEXT("FlowNode_OnActorUnregistered"), TEXT("ON_ACTOR_UNREGISTERED"));
+		TypeMap.Add(TEXT("FlowNode_OnNotifyFromActor"), TEXT("ON_NOTIFY"));
+		TypeMap.Add(TEXT("FlowNode_ExecuteComponent"), TEXT("EXECUTE_COMPONENT"));
+		TypeMap.Add(TEXT("FlowNode_ComponentObserver"), TEXT("COMPONENT_OBSERVER"));
+		TypeMap.Add(TEXT("FlowNode_PlayLevelSequence"), TEXT("PLAY_SEQUENCE"));
+		TypeMap.Add(TEXT("FlowNode_DefineProperties"), TEXT("DEFINE_PROPERTIES"));
 	}
 
 	const FString* Found = TypeMap.Find(NodeClass);
@@ -381,14 +430,23 @@ FString FBlueprintTextFormatter::GetReadableType(const FString& NodeClass) const
 		return *Found;
 	}
 
-	// Fallback: strip K2Node_ prefix
+	// Fallback: strip common prefixes
 	FString Result = NodeClass;
 	Result.RemoveFromStart(TEXT("K2Node_"));
+	Result.RemoveFromStart(TEXT("FlowNode_"));
+	Result.RemoveFromStart(TEXT("RFlowNode_"));
 	return Result;
 }
 
 FString FBlueprintTextFormatter::GetShortNodeId(const FString& NodeName)
 {
+	// FlowNode uses GUIDs as names -- shorten to last 4 chars
+	FGuid TestGuid;
+	if (FGuid::Parse(NodeName, TestGuid))
+	{
+		return NodeName.Right(4);
+	}
+
 	FString Id = NodeName;
 	Id.RemoveFromStart(TEXT("K2Node_"));
 
@@ -427,9 +485,123 @@ FString FBlueprintTextFormatter::GetShortNodeId(const FString& NodeName)
 	return Id;
 }
 
+FString FBlueprintTextFormatter::ExtractDisambiguator(const FExportedNode& Node)
+{
+	static const TSet<FString> SkipKeys = {
+		TEXT("DisplayName"), TEXT("SubGraphAsset"),
+		TEXT("Event"), TEXT("Function"), TEXT("Variable"), TEXT("CastTo"),
+		TEXT("Macro"), TEXT("Timeline"), TEXT("Enum"), TEXT("Collapsed"),
+		TEXT("ComponentProperty"), TEXT("DelegateProperty"),
+		TEXT("SelfContext"), TEXT("Override"),
+	};
+
+	for (const auto& Prop : Node.Properties)
+	{
+		if (SkipKeys.Contains(Prop.Key))
+		{
+			continue;
+		}
+
+		FString Value = Prop.Value;
+		// For tag-like values (dotted paths), take the last 2 segments for readability
+		int32 DotCount = 0;
+		for (TCHAR Ch : Value) { if (Ch == TEXT('.')) DotCount++; }
+		if (DotCount >= 2)
+		{
+			// Find the second-to-last dot
+			int32 LastDot = INDEX_NONE;
+			int32 SecondLastDot = INDEX_NONE;
+			for (int32 i = Value.Len() - 1; i >= 0; --i)
+			{
+				if (Value[i] == TEXT('.'))
+				{
+					if (LastDot == INDEX_NONE) { LastDot = i; }
+					else { SecondLastDot = i; break; }
+				}
+			}
+			if (SecondLastDot != INDEX_NONE)
+			{
+				Value = Value.Mid(SecondLastDot + 1);
+			}
+		}
+
+		return Value;
+	}
+
+	// Fallback: short GUID
+	return GetShortNodeId(Node.NodeName);
+}
+
+void FBlueprintTextFormatter::BuildDisambiguationMap(const TArray<FExportedNode>& Nodes)
+{
+	DisambiguationMap.Empty();
+
+	// Group nodes by semantic title
+	TMap<FString, TArray<const FExportedNode*>> TitleGroups;
+	for (const FExportedNode& Node : Nodes)
+	{
+		if (IsFlowRerouteNode(Node.NodeClass))
+		{
+			continue;
+		}
+		FString Title = GetSemanticTitle(Node);
+		TitleGroups.FindOrAdd(Title).Add(&Node);
+	}
+
+	// For non-unique titles, assign disambiguators
+	for (const auto& Group : TitleGroups)
+	{
+		if (Group.Value.Num() <= 1)
+		{
+			continue;
+		}
+
+		for (const FExportedNode* Node : Group.Value)
+		{
+			FString Disambiguator = ExtractDisambiguator(*Node);
+			DisambiguationMap.Add(Node->NodeName, Disambiguator);
+		}
+	}
+}
+
+FString FBlueprintTextFormatter::GetDisambiguatedTitle(const FExportedNode& Node) const
+{
+	FString Title = GetSemanticTitle(Node);
+	const FString* Suffix = DisambiguationMap.Find(Node.NodeName);
+	if (Suffix)
+	{
+		Title += FString::Printf(TEXT(" [%s]"), **Suffix);
+	}
+	return Title;
+}
+
 FString FBlueprintTextFormatter::GetSemanticTitle(const FExportedNode& Node) const
 {
 	const FString& NodeClass = Node.NodeClass;
+
+	// FlowNode path: use DisplayName property as title
+	bool bIsFlowNode = NodeClass.StartsWith(TEXT("FlowNode_"))
+		|| NodeClass.StartsWith(TEXT("RFlowNode_"));
+	if (bIsFlowNode)
+	{
+		// Find DisplayName property
+		for (const auto& Prop : Node.Properties)
+		{
+			if (Prop.Key == TEXT("DisplayName") && !Prop.Value.IsEmpty())
+			{
+				// For SubGraph nodes, append asset name
+				for (const auto& SubProp : Node.Properties)
+				{
+					if (SubProp.Key == TEXT("SubGraphAsset") && !SubProp.Value.IsEmpty())
+					{
+						return FString::Printf(TEXT("SubGraph: %s"), *SubProp.Value);
+					}
+				}
+				return Prop.Value;
+			}
+		}
+		return GetReadableType(NodeClass);
+	}
 
 	// Find primary property value (first non-Override, non-SelfContext property)
 	FString PrimaryValue;
@@ -569,14 +741,19 @@ TArray<FExportedNode> FBlueprintTextFormatter::TopologicalSort(const TArray<FExp
 	TArray<int32> SortedIndices;
 	while (Queue.Num() > 0)
 	{
-		// Sort queue: Event nodes first, then by name
+		// Sort queue: Event/Start nodes first, then by name
 		Queue.Sort([&Nodes](int32 A, int32 B)
 		{
-			bool AIsEvent = Nodes[A].NodeClass.Contains(TEXT("Event"));
-			bool BIsEvent = Nodes[B].NodeClass.Contains(TEXT("Event"));
+			auto IsEntryNode = [](const FExportedNode& N) {
+				return N.NodeClass.Contains(TEXT("Event"))
+					|| N.NodeClass == TEXT("FlowNode_Start")
+					|| N.NodeClass == TEXT("FlowNode_CustomInput");
+			};
+			bool AIsEvent = IsEntryNode(Nodes[A]);
+			bool BIsEvent = IsEntryNode(Nodes[B]);
 			if (AIsEvent != BIsEvent)
 			{
-				return AIsEvent; // Events come first
+				return AIsEvent;
 			}
 			return Nodes[A].NodeName < Nodes[B].NodeName;
 		});
@@ -632,7 +809,7 @@ TArray<FExportedPin> FBlueprintTextFormatter::GetMeaningfulPins(const FExportedN
 		}
 
 		// Skip all pins of Reroute nodes (shown in flow summary instead)
-		if (Node.NodeClass == TEXT("K2Node_Knot"))
+		if (IsFlowRerouteNode(Node.NodeClass))
 		{
 			continue;
 		}
@@ -737,7 +914,7 @@ TPair<FString, FString> FBlueprintTextFormatter::ResolveRerouteChain(const FStri
 		}
 
 		const FExportedNode& Node = **NodePtr;
-		if (Node.NodeClass != TEXT("K2Node_Knot"))
+		if (!IsFlowRerouteNode(Node.NodeClass))
 		{
 			break;
 		}
@@ -785,7 +962,7 @@ TPair<FString, FString> FBlueprintTextFormatter::ResolveRerouteChainBackward(con
 		}
 
 		const FExportedNode& Node = **NodePtr;
-		if (Node.NodeClass != TEXT("K2Node_Knot"))
+		if (!IsFlowRerouteNode(Node.NodeClass))
 		{
 			break;
 		}
@@ -823,7 +1000,7 @@ FString FBlueprintTextFormatter::FormatExecutionFlow(const TArray<FExportedNode>
 
 	for (const FExportedNode& Node : Nodes)
 	{
-		if (Node.NodeClass == TEXT("K2Node_Knot"))
+		if (IsFlowRerouteNode(Node.NodeClass))
 		{
 			continue;
 		}
@@ -852,13 +1029,13 @@ FString FBlueprintTextFormatter::FormatExecutionFlow(const TArray<FExportedNode>
 					Label = FString::Printf(TEXT(" [%s]"), *Pin.Name);
 				}
 
-				// Use semantic titles for both source and target
-				FString SourceTitle = GetSemanticTitle(Node);
+				// Use disambiguated titles for both source and target
+				FString SourceTitle = GetDisambiguatedTitle(Node);
 				FString TargetTitle = FinalTarget; // fallback
 				const FExportedNode* const* TargetNodePtr = NodeMap.Find(FinalTarget);
 				if (TargetNodePtr && *TargetNodePtr)
 				{
-					TargetTitle = GetSemanticTitle(**TargetNodePtr);
+					TargetTitle = GetDisambiguatedTitle(**TargetNodePtr);
 				}
 
 				Lines.Add(FString::Printf(TEXT("  %s%s --> %s"),
@@ -880,15 +1057,17 @@ FString FBlueprintTextFormatter::FormatSummary(const FExportedBlueprint& Bluepri
 {
 	TArray<FString> Lines;
 
-	// Blueprint header (same style as Format())
+	// Header (same style as Format())
+	const TCHAR* AssetLabel = IsFlowAsset(Blueprint) ? TEXT("FlowAsset") : TEXT("Blueprint");
+	const TCHAR* ParentLabel = IsFlowAsset(Blueprint) ? TEXT("ExpectedOwner") : TEXT("Parent");
 	if (Blueprint.ParentClass.IsEmpty())
 	{
-		Lines.Add(FString::Printf(TEXT("=== Blueprint: %s ==="), *Blueprint.BlueprintName));
+		Lines.Add(FString::Printf(TEXT("=== %s: %s ==="), AssetLabel, *Blueprint.BlueprintName));
 	}
 	else
 	{
-		Lines.Add(FString::Printf(TEXT("=== Blueprint: %s (Parent: %s) ==="),
-			*Blueprint.BlueprintName, *Blueprint.ParentClass));
+		Lines.Add(FString::Printf(TEXT("=== %s: %s (%s: %s) ==="),
+			AssetLabel, *Blueprint.BlueprintName, ParentLabel, *Blueprint.ParentClass));
 	}
 
 	if (!Blueprint.AssetPath.IsEmpty())
@@ -988,7 +1167,7 @@ FString FBlueprintTextFormatter::FormatSelectedNodes(const FExportedGraph& Graph
 	// Format each node
 	for (const FExportedNode& Node : SortedNodes)
 	{
-		if (Node.NodeClass == TEXT("K2Node_Knot"))
+		if (IsFlowRerouteNode(Node.NodeClass))
 		{
 			continue;
 		}
@@ -1131,6 +1310,16 @@ FString FBlueprintTextFormatter::FormatCompactGraph(const FExportedGraph& Graph)
 		NodeMap.Add(Node.NodeName, &Node);
 	}
 
+	// Disambiguation only for FlowGraph
+	if (Graph.GraphType == TEXT("FlowGraph"))
+	{
+		BuildDisambiguationMap(Graph.Nodes);
+	}
+	else
+	{
+		DisambiguationMap.Empty();
+	}
+
 	// Determine graph type and build signature
 	bool bIsFunction = (Graph.GraphType == TEXT("Function") || Graph.GraphType == TEXT("Macro")
 		|| Graph.GraphType == TEXT("Interface"));
@@ -1142,28 +1331,35 @@ FString FBlueprintTextFormatter::FormatCompactGraph(const FExportedGraph& Graph)
 	}
 	else
 	{
-		// EventGraph: each event is an entry point
+		// EventGraph / FlowGraph: each event/start is an entry point
 		Lines.Add(FString::Printf(TEXT("--- %s ---"), *Graph.GraphName));
 	}
 
-	// Find entry points: FunctionEntry, Event, CustomEvent, ComponentBoundEvent nodes
+	// Find entry points
 	TArray<const FExportedNode*> EntryNodes;
 	for (const FExportedNode& Node : Graph.Nodes)
 	{
 		if (Node.NodeClass == TEXT("K2Node_FunctionEntry")
 			|| Node.NodeClass == TEXT("K2Node_Event")
 			|| Node.NodeClass == TEXT("K2Node_CustomEvent")
-			|| Node.NodeClass == TEXT("K2Node_ComponentBoundEvent"))
+			|| Node.NodeClass == TEXT("K2Node_ComponentBoundEvent")
+			// FlowGraph entry points
+			|| Node.NodeClass == TEXT("FlowNode_Start")
+			|| Node.NodeClass == TEXT("FlowNode_CustomInput")
+			|| Node.NodeClass == TEXT("FlowNode_CustomEventBase"))
 		{
 			EntryNodes.Add(&Node);
 		}
 	}
 
-	// Sort entries: FunctionEntry first, then events alphabetically by semantic title
+	// Sort entries: FunctionEntry/Start first, then events alphabetically by semantic title
 	EntryNodes.Sort([this](const FExportedNode& A, const FExportedNode& B)
 	{
-		if (A.NodeClass == TEXT("K2Node_FunctionEntry")) return true;
-		if (B.NodeClass == TEXT("K2Node_FunctionEntry")) return false;
+		bool AIsEntry = (A.NodeClass == TEXT("K2Node_FunctionEntry")
+			|| A.NodeClass == TEXT("FlowNode_Start"));
+		bool BIsEntry = (B.NodeClass == TEXT("K2Node_FunctionEntry")
+			|| B.NodeClass == TEXT("FlowNode_Start"));
+		if (AIsEntry != BIsEntry) return AIsEntry;
 		return GetSemanticTitle(A) < GetSemanticTitle(B);
 	});
 
@@ -1172,10 +1368,32 @@ FString FBlueprintTextFormatter::FormatCompactGraph(const FExportedGraph& Graph)
 	{
 		TSet<FString> Visited;
 
-		// For events, print the event name as a header
+		// For events/entry nodes, print the name as a header
 		if (Entry->NodeClass != TEXT("K2Node_FunctionEntry"))
 		{
-			FString EventTitle = GetSemanticTitle(*Entry);
+			// FlowNode_Start: show as entry header in compact mode
+			if (Entry->NodeClass == TEXT("FlowNode_Start"))
+			{
+				Lines.Add(TEXT("[Start]:"));
+
+				for (const FExportedPin& Pin : Entry->Pins)
+				{
+					if (Pin.Category == TEXT("exec") && Pin.Direction == TEXT("Output")
+						&& Pin.LinkedTo.Num() > 0)
+					{
+						auto [FinalTarget, Unused] = ResolveRerouteChain(
+							Pin.LinkedTo[0].Key, Pin.LinkedTo[0].Value, NodeMap);
+
+						FString Chain = FormatCompactChain(FinalTarget, NodeMap, 0, Visited);
+						if (!Chain.IsEmpty())
+						{
+							Lines.Add(Chain);
+						}
+					}
+				}
+				continue;
+			}
+			FString EventTitle = GetDisambiguatedTitle(*Entry);
 			Lines.Add(FString::Printf(TEXT("[%s]:"), *EventTitle));
 		}
 
@@ -1221,8 +1439,8 @@ FString FBlueprintTextFormatter::FormatCompactChain(
 	const FExportedNode& Node = **NodePtr;
 	Visited.Add(NodeName);
 
-	// Skip Knot (reroute) nodes -- should already be resolved, but just in case
-	if (Node.NodeClass == TEXT("K2Node_Knot"))
+	// Skip reroute nodes -- should already be resolved, but just in case
+	if (IsFlowRerouteNode(Node.NodeClass))
 	{
 		for (const FExportedPin& Pin : Node.Pins)
 		{
@@ -1238,7 +1456,7 @@ FString FBlueprintTextFormatter::FormatCompactChain(
 	}
 
 	FString IndentStr = FString::ChrN(Indent * 2, TEXT(' '));
-	FString Title = GetSemanticTitle(Node);
+	FString Title = GetDisambiguatedTitle(Node);
 
 	// For FunctionResult nodes, show return values inline
 	if (Node.NodeClass == TEXT("K2Node_FunctionResult"))
@@ -1262,7 +1480,7 @@ FString FBlueprintTextFormatter::FormatCompactChain(
 				const FExportedNode* const* SourcePtr = NodeMap.Find(SourceNodeName);
 				if (SourcePtr && *SourcePtr)
 				{
-					ValStr += TEXT("=") + GetSemanticTitle(**SourcePtr);
+					ValStr += TEXT("=") + GetDisambiguatedTitle(**SourcePtr);
 				}
 			}
 			RetVals.Add(ValStr);

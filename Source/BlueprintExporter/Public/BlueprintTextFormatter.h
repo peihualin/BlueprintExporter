@@ -21,6 +21,9 @@ private:
 
 	FString GetReadableType(const FString& NodeClass) const;
 	FString GetSemanticTitle(const FExportedNode& Node) const;
+	FString GetDisambiguatedTitle(const FExportedNode& Node) const;
+	void BuildDisambiguationMap(const TArray<FExportedNode>& Nodes);
+	static FString ExtractDisambiguator(const FExportedNode& Node);
 	static FString GetShortNodeId(const FString& NodeName);
 
 	TArray<FExportedNode> TopologicalSort(const TArray<FExportedNode>& Nodes);
@@ -50,4 +53,5 @@ private:
 		const FString& ParentConfigSource);
 
 	TSet<FString> SelectionContext; // Empty = full export; non-empty = selection mode
+	TMap<FString, FString> DisambiguationMap; // NodeName → suffix for duplicate-title nodes
 };

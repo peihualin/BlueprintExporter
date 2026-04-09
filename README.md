@@ -1,6 +1,6 @@
 # BlueprintExporter 插件参考文档
 
-> 适用版本：v12（资产路径/接口/组件层级导出 + Config-only 白名单）
+> 适用版本：v13（FlowAsset 导出支持）
 > 引擎：Unreal Engine 5.x（Editor-only Plugin）
 > 作者：Capybara、Claude
 
@@ -17,18 +17,19 @@
 7. [技术架构](#7-技术架构)
 8. [数据结构参考](#8-数据结构参考)
 9. [注意事项](#9-注意事项)
+10. [FlowAsset 导出](#10-flowasset-导出)
 
 ---
 
 ## 1. 功能概述
 
-BlueprintExporter 是一个 UE5 Editor-only 插件，将蓝图的节点图（EventGraph、函数、宏、接口实现）导出为 AI 可读的纯文本格式。
+BlueprintExporter 是一个 UE5 Editor-only 插件，将蓝图的节点图（EventGraph、函数、宏、接口实现）和 FlowGraph 的 FlowAsset 导出为 AI 可读的纯文本格式。
 
-**核心用途**：将蓝图逻辑完整地描述给 AI，辅助理解与转写为 C++。
+**核心用途**：将蓝图 / FlowAsset 逻辑完整地描述给 AI，辅助理解与转写为 C++。
 
 除图表逻辑外，`_summary.txt` 还会补充蓝图资产路径、已实现接口、蓝图新增组件层级等结构化上下文，减少 AI 只看节点时丢失场景信息的问题。
 
-**六项核心功能**：
+**八项核心功能**：
 
 |功能|触发方式|
 |-|-|
@@ -38,6 +39,8 @@ BlueprintExporter 是一个 UE5 Editor-only 插件，将蓝图的节点图（Eve
 |关闭编辑器时全量导出|关闭编辑器前自动触发，受 `bExportOnEditorClose` 开关控制|
 |选中节点导出|蓝图编辑器内右键节点 → Copy / Export Selected Nodes|
 |CDO 配置导出|GameplayEffect / GameplayAbility 等数据蓝图自动提取专用配置|
+|FlowAsset 按需导出|Content Browser 右键 FlowAsset → Export FlowAsset Logic|
+|FlowAsset 批量导出|Content Browser 右键 FlowAsset → Export All FlowAssets to Cache|
 
 ---
 
@@ -685,9 +688,146 @@ CDO 导出的枚举字符串（格式 `EAI_State::NewEnumerator0`）在读取 CD
 
 ---
 
+## 10. FlowAsset 导出
+
+### 10.1 概述
+
+v13 新增对 [FlowGraph](https://github.com/MothCocoon/FlowGraph) 插件的 `UFlowAsset` 导出支持。FlowAsset 是一种基于 UObject 的流式节点图（非蓝图），广泛用于任务系统、关卡流程等场景。导出器直接读取 `UFlowNode` 运行时模型（而非 UEdGraph 编辑器图），提取节点、引脚、连接和节点属性。
+
+**前置依赖**：项目需启用 FlowGraph 插件（`Flow` 模块）。
+
+### 10.2 使用入口
+
+|功能|触发方式|
+|-|-|
+|按需导出单个/多个 FlowAsset|Content Browser 右键 FlowAsset → Export FlowAsset Logic|
+|批量全量导出|Content Browser 右键 FlowAsset → Export All FlowAssets to Cache|
+|自动导出（保存时）|Ctrl+S 时自动触发，受 `bAutoExportFlowAssetOnSave` 开关控制|
+|关闭编辑器时全量导出|与蓝图共享 `bExportOnEditorClose` 开关|
+
+### 10.3 Settings 配置
+
+位置：`Editor Preference Settings → Plugins → Blueprint Exporter → FlowAsset Export`
+
+|属性|类型|默认值|说明|
+|-|-|-|-|
+|`bExportFlowAssets`|bool|`true`|FlowAsset 导出总开关|
+|`bAutoExportFlowAssetOnSave`|bool|`false`|每次保存 FlowAsset 时自动导出到缓存|
+
+### 10.4 输出目录结构
+
+```
+{ProjectDir}/FlowAssetExports/
+├── AGENTS.md                       ← AI 引导文件（自动生成）
+├── FG_AiC4/
+│   ├── _summary.txt                ← 紧凑执行流树 + 配置（先读这个）
+│   └── Flow_Graph.txt              ← 完整节点/引脚/连接详情
+└── ...
+```
+
+### 10.5 输出格式
+
+**`_summary.txt` 示例**：
+
+```
+=== FlowAsset: FG_AiC4 (ExpectedOwner: FlowComponent) ===
+Path: /Game/Blueprints/FlowGraph/StreetFight/FG_AiC4
+
+=== Configuration ===
+  WorldBound = true
+
+--- Flow Graph ---
+[Start]:
+Sequence:
+├ [0]:
+  On Trigger Event [Trigger.AiC4A1]:
+  └ [Enter]:
+    Enable Trigger Box [Trigger.AiC4A2]:
+    └ [End]:
+      Notify Actor [C4.A1]:
+      └ [Out]: Notify Actor [SpawnPoint.C4AiA1]
+├ [1]:
+  On Trigger Event [Trigger.AiC4A2]:
+  └ [Enter]:
+    Enable Trigger Box [Trigger.AiC4A1]:
+    └ [End]:
+      Notify Actor [C4.A1]:
+      └ [Out]: Notify Actor [SpawnPoint.C4AiA2]
+└ [2]:
+  On Trigger Event [Trigger.AIC4B325]:
+  └ [Enter]:
+    Notify Actor [C4.B325]:
+    └ [Out]: Notify Actor [SpawnPoint.C4B325]
+```
+
+**`Flow_Graph.txt` 示例**（节点详情）：
+
+```
+[On Trigger Event [Trigger.AiC4A1]] (4A9F)
+  IdentityTags: StreetFight.Trigger.AiC4A1
+  → Enter (exec) -> Enable Trigger Box [Trigger.AiC4A2].Start
+  → Exit (exec)
+```
+
+### 10.6 节点消歧机制
+
+FlowGraph 中经常出现大量同类型节点（如多个 `On Trigger Event`、`Notify Actor`）。当同一图内存在多个相同 DisplayName 的节点时，导出器自动从节点属性（优先取 `IdentityTags`）中提取简短消歧标识，附加到节点标题后方括号中：
+
+- `On Trigger Event [Trigger.AiC4A1]` — 取 IdentityTags 最后两段
+- `Notify Actor [C4.A1]` — 取 IdentityTags 最后两段
+- `Notify Actor [SpawnPoint.C4AiA1]` — 取 IdentityTags 最后两段
+
+此消歧机制**仅对 FlowGraph 类型的图启用**，不影响蓝图导出输出。
+
+### 10.7 节点属性提取
+
+FlowNode 的 UPROPERTY 属性通过 UObject 反射提取，规则：
+- 只导出标记为 `EditAnywhere` / `EditDefaultsOnly` / `BlueprintVisible` 的属性
+- 跳过 `UFlowNode` 基类已有的属性（InputPins, OutputPins, Connections, NodeGuid 等）
+- 跳过 `Transient` 属性
+- 只导出与类默认值不同的属性值（差异导出）
+- 特殊类型处理：GameplayTag/Container 直接输出标签字符串，SoftObjectPtr 输出资产名，枚举输出显示名
+
+### 10.8 FlowNode 类型映射
+
+|节点类|输出标记|
+|-|-|
+|`FlowNode_Start`|`START`|
+|`FlowNode_Finish`|`FINISH`|
+|`FlowNode_Branch`|`BRANCH`|
+|`FlowNode_ExecutionSequence`|`SEQUENCE`|
+|`FlowNode_SubGraph`|`SUB_GRAPH`|
+|`FlowNode_Timer`|`TIMER`|
+|`FlowNode_CustomInput`|`CUSTOM_INPUT`|
+|`FlowNode_CustomOutput`|`CUSTOM_OUTPUT`|
+|`FlowNode_Reroute`|`REROUTE`（不输出到节点列表，自动穿透）|
+|`FlowNode_ComponentObserver`|`COMPONENT_OBSERVER`|
+|`RFlowNode_*`（项目自定义）|去掉 `RFlowNode_` 前缀|
+
+### 10.9 与蓝图导出的隔离
+
+FlowAsset 导出与蓝图导出完全隔离：
+- 输出到独立目录 `FlowAssetExports/`（而非 `BlueprintExports/`）
+- 独立的 `AGENTS.md` 引导文件
+- 独立的 Settings 开关（`bExportFlowAssets` / `bAutoExportFlowAssetOnSave`）
+- 节点消歧机制仅对 FlowGraph 图类型启用，不改变蓝图导出格式
+- 增量检测机制复用相同的双层策略（时间戳 + 内容比对）
+
+---
+
 ## 附录：版本更新摘要
 
-### v12（当前版本）
+### v13（当前版本）
+
+- **FlowAsset 导出**：新增对 FlowGraph 插件的 `UFlowAsset` 导出支持，通过 UObject 反射提取 `UFlowNode` 运行时模型
+- **FlowNode 属性反射**：自动提取 FlowNode 子类的 UPROPERTY（EditAnywhere 等），支持 GameplayTag、SoftObjectPtr、枚举等类型的语义化输出
+- **同名节点消歧**：FlowGraph 中多个同类型节点（如多个 `Notify Actor`）自动从 IdentityTags 等属性提取消歧标识附加到标题
+- **FlowNode_Reroute 穿透**：与蓝图 K2Node_Knot 相同的 Reroute 穿透机制
+- **独立输出目录**：FlowAsset 导出到 `FlowAssetExports/`，含独立 AGENTS.md
+- **新增模块依赖**：Flow（FlowGraph 运行时模块）
+- **蓝图导出无影响**：所有 FlowAsset 相关逻辑通过类型守卫隔离，不改变任何蓝图导出行为
+
+### v12
 
 - **结构化上下文导出**：`_summary.txt` / 单文件导出新增 `Path:`、`Interfaces:`、`=== Components ===`
 - **组件层级导出**：提取蓝图新增组件树，并附带 `StaticMesh` / `SkeletalMesh` / `ChildActor` 的关键详情

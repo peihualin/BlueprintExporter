@@ -2,6 +2,7 @@
 #include "BlueprintGraphExtractor.h"
 #include "BlueprintTextFormatter.h"
 #include "BlueprintExporterSettings.h"
+#include "FlowAssetExtractor.h"
 
 #include "ToolMenus.h"
 #include "ToolMenuContext.h"
@@ -26,6 +27,7 @@
 #include "Misc/DateTime.h"
 #include "Misc/PackageName.h"
 #include "Editor.h"
+#include "FlowAsset.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogBlueprintExporter, Log, All);
 
@@ -206,6 +208,76 @@ void FBlueprintExporterModule::RegisterMenus()
 		FToolMenuExecuteAction::CreateLambda([this](const FToolMenuContext&)
 		{
 			ExportAllBlueprints();
+		})
+	);
+
+	// FlowAsset Content Browser context menu
+	UToolMenu* FlowMenu = UToolMenus::Get()->ExtendMenu("ContentBrowser.AssetContextMenu.FlowAsset");
+	FToolMenuSection& FlowSection = FlowMenu->AddSection("FlowAssetExporter",
+		LOCTEXT("FlowAssetExporterSection", "FlowAsset Exporter"));
+
+	FlowSection.AddMenuEntry(
+		"ExportFlowAssetLogic",
+		LOCTEXT("ExportFlowLabel", "Export FlowAsset Logic"),
+		LOCTEXT("ExportFlowTooltip", "Export flow graph to AI-readable plain text"),
+		FSlateIcon(),
+		FToolMenuExecuteAction::CreateLambda([this](const FToolMenuContext& Context)
+		{
+			const UContentBrowserAssetContextMenuContext* CBContext =
+				Context.FindContext<UContentBrowserAssetContextMenuContext>();
+			if (!CBContext)
+			{
+				return;
+			}
+
+			for (const FAssetData& AssetData : CBContext->SelectedAssets)
+			{
+				UFlowAsset* FlowAsset = Cast<UFlowAsset>(AssetData.GetAsset());
+				if (!FlowAsset)
+				{
+					continue;
+				}
+
+				FFlowAssetExtractor Extractor;
+				FExportedBlueprint ExportedFA = Extractor.Extract(FlowAsset);
+
+				FBlueprintTextFormatter Formatter;
+				FString OutputText = Formatter.Format(ExportedFA);
+
+				IDesktopPlatform* DesktopPlatform = FDesktopPlatformModule::Get();
+				if (!DesktopPlatform)
+				{
+					continue;
+				}
+
+				const FString DefaultFileName = FString::Printf(TEXT("%s_exported.txt"), *FlowAsset->GetName());
+				TArray<FString> OutFiles;
+				const bool bOpened = DesktopPlatform->SaveFileDialog(
+					FSlateApplication::Get().FindBestParentWindowHandleForDialogs(nullptr),
+					TEXT("Export FlowAsset Logic"),
+					FPaths::ProjectDir(),
+					DefaultFileName,
+					TEXT("Text Files (*.txt)|*.txt"),
+					0,
+					OutFiles);
+
+				if (bOpened && OutFiles.Num() > 0)
+				{
+					FFileHelper::SaveStringToFile(OutputText, *OutFiles[0],
+						FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM);
+				}
+			}
+		})
+	);
+
+	FlowSection.AddMenuEntry(
+		"ExportAllFlowAssetsToCache",
+		LOCTEXT("ExportAllFlowLabel", "Export All FlowAssets to Cache"),
+		LOCTEXT("ExportAllFlowTooltip", "Scan all FlowAssets and export to ProjectDir/FlowAssetExports/"),
+		FSlateIcon(),
+		FToolMenuExecuteAction::CreateLambda([this](const FToolMenuContext&)
+		{
+			ExportAllFlowAssets();
 		})
 	);
 }
@@ -572,29 +644,43 @@ void FBlueprintExporterModule::OnPackageSaved(const FString& /*PackageFilename*/
 	UPackage* Package, FObjectPostSaveContext /*SaveContext*/)
 {
 	const UBlueprintExporterSettings* Settings = GetDefault<UBlueprintExporterSettings>();
-	if (!Settings || !Settings->bAutoExportOnSave || !Package)
+	if (!Settings || !Package)
 	{
 		return;
 	}
 
 	ForEachObjectWithPackage(Package, [this, Settings](UObject* Obj) -> bool
 	{
-		UBlueprint* BP = Cast<UBlueprint>(Obj);
-		if (!BP)
+		// Blueprint auto-export
+		if (Settings->bAutoExportOnSave)
 		{
-			return true;
+			if (UBlueprint* BP = Cast<UBlueprint>(Obj))
+			{
+				FExportedBlueprint ExtractedBP;
+				if (ShouldExport(BP, Settings, &ExtractedBP))
+				{
+					ExportBlueprintToCache(BP, &ExtractedBP);
+					GenerateAgentsMd();
+				}
+				else
+				{
+					DeleteCachedExportDirectory(BP->GetName());
+				}
+				return true;
+			}
 		}
 
-		FExportedBlueprint ExtractedBP;
-		if (ShouldExport(BP, Settings, &ExtractedBP))
+		// FlowAsset auto-export
+		if (Settings->bAutoExportFlowAssetOnSave && Settings->bExportFlowAssets)
 		{
-			ExportBlueprintToCache(BP, &ExtractedBP);
-			GenerateAgentsMd();
+			if (UFlowAsset* FlowAsset = Cast<UFlowAsset>(Obj))
+			{
+				ExportFlowAssetToCache(FlowAsset);
+				GenerateFlowAgentsMd();
+				return true;
+			}
 		}
-		else
-		{
-			DeleteCachedExportDirectory(BP->GetName());
-		}
+
 		return true;
 	});
 }
@@ -608,6 +694,11 @@ void FBlueprintExporterModule::OnEditorPreExit()
 	}
 
 	ExportAllBlueprints();
+
+	if (Settings->bExportFlowAssets)
+	{
+		ExportAllFlowAssets();
+	}
 }
 
 bool FBlueprintExporterModule::ExportBlueprintToCache(UBlueprint* Blueprint, FExportedBlueprint* PreExtracted)
@@ -750,6 +841,12 @@ void FBlueprintExporterModule::ExportAllBlueprints()
 	UE_LOG(LogBlueprintExporter, Log,
 		TEXT("ExportAll complete: %d exported, %d skipped (unchanged), %d filtered out, %d total assets"),
 		ExportedCount, SkippedCount, FilteredCount, BPAssets.Num());
+
+	// Also export FlowAssets if enabled
+	if (Settings && Settings->bExportFlowAssets)
+	{
+		ExportAllFlowAssets();
+	}
 }
 
 // Embedded content for BlueprintExports/AGENTS.md
@@ -876,6 +973,238 @@ void FBlueprintExporterModule::CleanupStaleExports(const TSet<FString>& CurrentB
 		}
 
 		if (!CurrentBPNames.Contains(SubDir))
+		{
+			const FString FullPath = FPaths::Combine(BaseDir, SubDir);
+			IFileManager::Get().DeleteDirectory(*FullPath, /*RequireExists=*/false, /*Tree=*/true);
+		}
+	}
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// FlowAsset Export
+// ────────────────────────────────────────────────────────────────────────────
+
+bool FBlueprintExporterModule::ExportFlowAssetToCache(UFlowAsset* FlowAsset)
+{
+	if (!FlowAsset)
+	{
+		return false;
+	}
+
+	FFlowAssetExtractor Extractor;
+	FExportedBlueprint ExportedFA = Extractor.Extract(FlowAsset);
+
+	FBlueprintTextFormatter Formatter;
+
+	const FString FAName = FlowAsset->GetName();
+	const FString OutputDir = FPaths::Combine(
+		FPaths::ProjectDir(), TEXT("FlowAssetExports"), FAName);
+
+	IFileManager::Get().MakeDirectory(*OutputDir, /*Tree=*/true);
+
+	int32 FilesWritten = 0;
+
+	// Write individual graph files
+	for (const FExportedGraph& Graph : ExportedFA.Graphs)
+	{
+		FString GraphText = Formatter.FormatGraphOnly(Graph);
+		if (GraphText.IsEmpty())
+		{
+			continue;
+		}
+
+		const FString FileName = SanitizeFileName(Graph.GraphName) + TEXT(".txt");
+		const FString FilePath = FPaths::Combine(OutputDir, FileName);
+		if (WriteFileIfChanged(FilePath, GraphText))
+		{
+			FilesWritten++;
+		}
+	}
+
+	// Write summary file
+	const FString SummaryText = Formatter.FormatSummary(ExportedFA);
+	const FString SummaryPath = FPaths::Combine(OutputDir, TEXT("_summary.txt"));
+	if (WriteFileIfChanged(SummaryPath, SummaryText))
+	{
+		FilesWritten++;
+	}
+
+	if (FilesWritten > 0)
+	{
+		UE_LOG(LogBlueprintExporter, Log,
+			TEXT("Exported FlowAsset %s: %d file(s) updated"), *FAName, FilesWritten);
+	}
+	else
+	{
+		UE_LOG(LogBlueprintExporter, Verbose,
+			TEXT("Exported FlowAsset %s: no changes detected"), *FAName);
+	}
+
+	return FilesWritten > 0;
+}
+
+void FBlueprintExporterModule::ExportAllFlowAssets()
+{
+	FAssetRegistryModule& AssetRegistryModule =
+		FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
+	IAssetRegistry& AssetRegistry = AssetRegistryModule.Get();
+
+	AssetRegistry.SearchAllAssets(/*bSynchronousSearch=*/true);
+
+	TArray<FAssetData> FlowAssets;
+	AssetRegistry.GetAssetsByClass(
+		UFlowAsset::StaticClass()->GetClassPathName(), FlowAssets, /*bSearchSubClasses=*/true);
+
+	const FString ExportDir = FPaths::Combine(FPaths::ProjectDir(), TEXT("FlowAssetExports"));
+
+	TSet<FString> CurrentNames;
+	int32 ExportedCount = 0;
+	int32 SkippedCount = 0;
+
+	for (const FAssetData& AssetData : FlowAssets)
+	{
+		const FString FAName = AssetData.AssetName.ToString();
+		const FString SanitizedName = SanitizeFileName(FAName);
+
+		// Timestamp check: skip unchanged assets
+		const FString SummaryPath = ExportDir / SanitizedName / TEXT("_summary.txt");
+		const FDateTime ExportTimestamp = IFileManager::Get().GetTimeStamp(*SummaryPath);
+
+		if (ExportTimestamp > FDateTime::MinValue())
+		{
+			const FDateTime UassetTimestamp = GetAssetFileTimestamp(AssetData);
+			if (UassetTimestamp > FDateTime::MinValue() && ExportTimestamp >= UassetTimestamp)
+			{
+				SkippedCount++;
+				CurrentNames.Add(SanitizedName);
+				continue;
+			}
+		}
+
+		UFlowAsset* FA = Cast<UFlowAsset>(AssetData.GetAsset());
+		if (!FA)
+		{
+			continue;
+		}
+
+		// Check if it has any nodes worth exporting
+		if (FA->GetNodes().Num() == 0)
+		{
+			continue;
+		}
+
+		ExportFlowAssetToCache(FA);
+		ExportedCount++;
+		CurrentNames.Add(SanitizedName);
+	}
+
+	CleanupStaleFlowExports(CurrentNames);
+	GenerateFlowAgentsMd();
+
+	UE_LOG(LogBlueprintExporter, Log,
+		TEXT("FlowAsset ExportAll complete: %d exported, %d skipped (unchanged), %d total assets"),
+		ExportedCount, SkippedCount, FlowAssets.Num());
+}
+
+static const TCHAR* GFlowAgentsMdContent = TEXT(
+	"## FlowAsset Exports\n"
+	"\n"
+	"This directory contains AI-readable FlowAsset exports.\n"
+	"\n"
+	"## Reading Order\n"
+	"\n"
+	"1. Locate the relevant FlowAsset export folder by asset name.\n"
+	"2. Read `<AssetName>/_summary.txt` first.\n"
+	"3. Read `Flow_Graph.txt` only when `_summary.txt` is not enough.\n"
+	"\n"
+	"## What `_summary.txt` Contains\n"
+	"\n"
+	"`_summary.txt` is the primary entry point. It contains:\n"
+	"- FlowAsset header: `=== FlowAsset: Name (ExpectedOwner: OwnerClass) ===`\n"
+	"- Asset path: `Path: /Game/...` (source asset location in content browser)\n"
+	"- Configuration: `=== Configuration ===` (asset-level settings like WorldBound)\n"
+	"- Compact execution flow: `--- Flow Graph ---` section with tree-style execution overview\n"
+	"\n"
+	"### Compact execution flow\n"
+	"- `[Start]:` marks the main entry point of the flow graph.\n"
+	"- Node names like `Spawn AI By Time`, `Branch`, `Enable Trigger Box` are semantic node summaries.\n"
+	"- Node properties are shown in parentheses: `Spawn AI By Time (TickInterval=0.5)`\n"
+	"- `BRANCH:` or `Branch:` means a conditional branch node.\n"
+	"- Tree markers `\\u251C` and `\\u2514` indicate execution subpaths.\n"
+	"- Labels like `[True]`, `[False]`, `[Then 0]` are output pin names.\n"
+	"- `[continues...]` means the exporter detected a cycle and stopped.\n"
+	"- `SubGraph: AssetName` means a subgraph node referencing another FlowAsset.\n"
+	"\n"
+	"## What Graph Files Contain\n"
+	"\n"
+	"`Flow_Graph.txt` is the detailed node-level export.\n"
+	"\n"
+	"### Node block\n"
+	"- Node header format: `[SemanticTitle] (ShortId)`.\n"
+	"- `SemanticTitle` is the node's display name (e.g. `Start`, `Branch`, `Spawn AI By Time`).\n"
+	"- `ShortId` is a truncated GUID for locating the node.\n"
+	"\n"
+	"### Property lines\n"
+	"- Format: `  Property: Value`.\n"
+	"- These are the node's configured UPROPERTY values that differ from defaults.\n"
+	"\n"
+	"### Pin lines\n"
+	"- Output pins use `\\u2192`; input pins use `\\u2190`.\n"
+	"- Format: `Arrow PinName (Type) [-> TargetNode.TargetPin]`.\n"
+	"- Exec pins are the primary execution flow connections.\n"
+	"- Data pins carry typed values between nodes.\n"
+	"\n"
+	"### Execution Flow section\n"
+	"- `=== Execution Flow ===` is a flattened edge list.\n"
+	"- `Source --> Target` means direct exec flow.\n"
+	"- `Source [Label] --> Target` means flow through a labeled exec pin.\n"
+	"\n"
+	"## FlowNode Types\n"
+	"\n"
+	"| Node Class | Purpose |\n"
+	"|------------|--------|\n"
+	"| `FlowNode_Start` | Graph entry point |\n"
+	"| `FlowNode_Finish` | Graph termination |\n"
+	"| `FlowNode_Branch` | Conditional routing (uses AddOn predicates) |\n"
+	"| `FlowNode_ExecutionSequence` | Execute outputs sequentially |\n"
+	"| `FlowNode_SubGraph` | Spawn and execute a child FlowAsset |\n"
+	"| `FlowNode_Timer` | Delay execution |\n"
+	"| `FlowNode_CustomInput/Output` | Custom entry/exit points for SubGraph |\n"
+	"| `FlowNode_ComponentObserver` | Observe actor components |\n"
+	"| `RFlowNode_*` | Project-specific custom nodes |\n"
+	"\n"
+	"## Practical Guidance\n"
+	"\n"
+	"- Prefer semantic titles (e.g. `Spawn AI By Time`) over node GUIDs when discussing logic.\n"
+	"- `SubGraph: AssetName` references another FlowAsset; read that asset's `_summary.txt` for details.\n"
+	"- Node properties show only values that differ from class defaults.\n"
+	"- `[continues...]` means the exporter stopped expanding to avoid cycles.\n"
+);
+
+void FBlueprintExporterModule::GenerateFlowAgentsMd()
+{
+	const FString BaseDir = FPaths::Combine(FPaths::ProjectDir(), TEXT("FlowAssetExports"));
+	const FString AgentsPath = FPaths::Combine(BaseDir, TEXT("AGENTS.md"));
+
+	IFileManager::Get().MakeDirectory(*BaseDir, /*Tree=*/true);
+	WriteFileIfChanged(AgentsPath, GFlowAgentsMdContent);
+}
+
+void FBlueprintExporterModule::CleanupStaleFlowExports(const TSet<FString>& CurrentNames)
+{
+	const FString BaseDir = FPaths::Combine(FPaths::ProjectDir(), TEXT("FlowAssetExports"));
+
+	TArray<FString> SubDirs;
+	IFileManager::Get().FindFiles(SubDirs, *(BaseDir / TEXT("*")), /*bFiles=*/false, /*bDirectories=*/true);
+
+	for (const FString& SubDir : SubDirs)
+	{
+		if (SubDir.StartsWith(TEXT("_")))
+		{
+			continue;
+		}
+
+		if (!CurrentNames.Contains(SubDir))
 		{
 			const FString FullPath = FPaths::Combine(BaseDir, SubDir);
 			IFileManager::Get().DeleteDirectory(*FullPath, /*RequireExists=*/false, /*Tree=*/true);

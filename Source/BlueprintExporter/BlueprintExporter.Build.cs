@@ -32,6 +32,7 @@ public class BlueprintExporter : ModuleRules
 			"DeveloperSettings",
 			"GameplayAbilities",
 			"GameplayTags",
+			"Flow",
 		});
 	}
 }
